@@ -3,6 +3,7 @@ import os
 import json
 import uuid
 import zipfile
+import base64
 from io import BytesIO
 import pandas as pd
 from PIL import Image
@@ -16,6 +17,7 @@ IMAGES_DIR = os.path.join(DATA_DIR, "images")
 for d in [DATA_DIR, IMAGES_DIR]:
     os.makedirs(d, exist_ok=True)
 
+# --- HELPERS ---
 def load_json(f):
     if os.path.exists(f):
         try:
@@ -29,6 +31,13 @@ def save_json(f, d):
 def logout():
     st.session_state.clear()
     st.rerun()
+
+# --- NEW: BASE64 CONVERTER ---
+def get_image_base64(pil_img):
+    buffered = BytesIO()
+    pil_img.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/png;base64,{img_str}"
 
 # --- MAIN APP ---
 def main():
@@ -70,7 +79,7 @@ def login_ui():
 def admin_ui():
     st.sidebar.title("Administrator")
     st.sidebar.button("Logout", on_click=logout)
-    menu = st.sidebar.radio("Navigation", ["Manage Projects", "Assign Tasks", "Review & Export"])
+    menu = st.sidebar.radio("Navigation", ["Manage Projects", "Assign Tasks", "Export"])
     
     projs = load_json(PROJECTS_FILE)
     users_data = load_json(USERS_FILE)
@@ -96,26 +105,13 @@ def admin_ui():
                 Image.open(f).save(os.path.join(IMAGES_DIR, f"{id}.png"))
                 p['images'].append({'id': id})
             save_json(PROJECTS_FILE, projs)
-            st.success("Uploaded!")
-        
-        st.divider()
-        all_assigned = []
-        for u in p['assignments']: all_assigned.extend(p['assignments'][u])
-        avail = [im['id'] for im in p['images'] if im['id'] not in all_assigned]
-        if avail:
-            target = st.selectbox("Worker", list(users_data.keys()))
-            num = st.number_input("Count", 1, len(avail), min(10, len(avail)))
-            if st.button("Confirm Bulk Assignment"):
-                if target not in p['access_users']: p['access_users'].append(target)
-                p['assignments'].setdefault(target, []).extend(avail[:num])
-                save_json(PROJECTS_FILE, projs); st.rerun()
 
-    elif menu == "Review & Export":
+    elif menu == "Export":
         sel_p = st.selectbox("Select Project", list(projs.keys()))
-        if st.button("📦 Export YOLO ZIP"):
+        if st.button("Download ZIP"):
             download_yolo(sel_p, projs[sel_p])
 
-# --- USER INTERFACE (WITH RESET & VISIBILITY FIX) ---
+# --- USER INTERFACE (WITH BASE64 FIX) ---
 def user_ui():
     from streamlit_drawable_canvas import st_canvas
     st.sidebar.button("Logout", on_click=logout)
@@ -124,7 +120,7 @@ def user_ui():
     my_projs = [n for n, p in projs.items() if st.session_state.username in p['access_users']]
     
     if not my_projs: st.info("No work assigned."); return
-    p_name = st.selectbox("Current Project", my_projs)
+    p_name = st.selectbox("Project", my_projs)
     p = projs[p_name]
     my_imgs = p['assignments'].get(st.session_state.username, [])
     pending = [i for i in my_imgs if p.get('statuses', {}).get(i, {}).get(st.session_state.username) not in ["Completed", "Skipped"]]
@@ -137,55 +133,44 @@ def user_ui():
     if os.path.exists(img_path):
         img_obj = Image.open(img_path).convert("RGB")
         
-        # 1. Coordinate Scaling
-        zoom = st.sidebar.slider("Image Zoom", 0.5, 3.0, 1.0, 0.1)
-        base_h = 600
-        canvas_h = int(base_h * zoom)
+        # Dimensions & Zoom
+        zoom = st.sidebar.slider("Zoom", 0.5, 3.0, 1.0, 0.1)
+        canvas_h = int(600 * zoom)
         canvas_w = int(canvas_h * (img_obj.width / img_obj.height))
         
-        # Stability Cap for Wide Images
-        if canvas_w > 1100:
-            canvas_w = 1100
+        # Security cap for width
+        if canvas_w > 1000:
+            canvas_w = 1000
             canvas_h = int(canvas_w * (img_obj.height / img_obj.width))
 
+        # Prepare Background Image
         resized_img = img_obj.resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+        bg_base64 = get_image_base64(resized_img)
         
         col_ui, col_canvas = st.columns([1, 4])
         with col_ui:
-            st.subheader("Controls")
             sel_cls = st.selectbox("Product", p['product_list'], key=f"cls_{img_id}")
-            
             if st.button("💾 Save & Next", use_container_width=True):
                 st.session_state[f"sub_{img_id}"] = True
             
-            if st.button("⏭️ Skip", use_container_width=True):
-                p.setdefault('statuses', {}).setdefault(img_id, {})[st.session_state.username] = "Skipped"
-                save_json(PROJECTS_FILE, projs); st.rerun()
-            
-            st.divider()
-            # RESET BUTTON: Increments a counter to force a new canvas key
-            if st.button("🔄 Reload Image", help="Use this if the image is blank"):
-                ver = st.session_state.get('canvas_ver', 0)
-                st.session_state['canvas_ver'] = ver + 1
+            # Manual Reset
+            if st.button("🔄 Refresh Canvas"):
+                st.session_state[f"ver_{img_id}"] = st.session_state.get(f"ver_{img_id}", 0) + 1
                 st.rerun()
 
         with col_canvas:
-            # Key forces refresh on zoom OR manual reset
-            ver = st.session_state.get('canvas_ver', 0)
-            canvas_key = f"can_{img_id}_{int(zoom*100)}_{ver}"
-            
+            ver = st.session_state.get(f"ver_{img_id}", 0)
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_width=2,
                 stroke_color="#FF0000",
-                background_image=resized_img,
-                background_color="#FFFFFF00", # Explicit Transparency
+                background_image=Image.open(BytesIO(base64.b64decode(bg_base64.split(",")[1]))),
+                background_color="#FFFFFF00",
                 height=canvas_h, 
                 width=canvas_w,
                 drawing_mode="rect",
                 display_toolbar=True,
-                key=canvas_key,
-                update_freq=1000
+                key=f"can_{img_id}_{int(zoom*100)}_{ver}"
             )
 
         if st.session_state.get(f"sub_{img_id}"):
@@ -202,11 +187,7 @@ def user_ui():
                 save_json(PROJECTS_FILE, projs)
                 st.session_state[f"sub_{img_id}"] = False
                 st.rerun()
-            else:
-                st.warning("Draw a box first!")
-                st.session_state[f"sub_{img_id}"] = False
 
-# --- EXPORT TO YOLO ---
 def download_yolo(name, p):
     buf = BytesIO()
     with zipfile.ZipFile(buf, 'w') as z:
@@ -223,7 +204,7 @@ def download_yolo(name, p):
                             lbl += f"{idx} {' '.join([f'{v:.6f}' for v in a['bbox']])}\n"
                 if lbl: z.writestr(f"labels/{iid}.txt", lbl)
         z.writestr("data.yaml", f"names: {p['product_list']}\nnc: {len(p['product_list'])}\ntrain: images\nval: images")
-    st.download_button("📦 Download Dataset", buf.getvalue(), f"{name}_yolo.zip")
+    st.download_button("Download Now", buf.getvalue(), f"{name}_yolo.zip")
 
 if __name__ == "__main__":
     main()
