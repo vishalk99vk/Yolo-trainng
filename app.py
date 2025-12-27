@@ -87,6 +87,7 @@ def login_page():
             st.error("Invalid credentials")
 
 def admin_page():
+    st.sidebar.button("Logout", on_click=logout)
     st.header("Admin Panel")
     menu = st.sidebar.selectbox("Menu", ["Create Project", "Add User", "Manage Projects"])
     
@@ -96,6 +97,75 @@ def admin_page():
         add_user()
     elif menu == "Manage Projects":
         manage_projects()
+
+def user_page():
+    st.sidebar.button("Logout", on_click=logout)
+    st.header("User Panel")
+    projects = load_projects()
+    accessible_projects = [p for p in projects if st.session_state.username in projects[p]['access_users']]
+    
+    if not accessible_projects:
+        st.write("No accessible projects")
+        return
+    
+    selected_project = st.selectbox("Select Project", accessible_projects)
+    project = projects[selected_project]
+    
+    st.write("Product List:", project['product_list'])
+    
+    assigned_images = project['assignments'].get(st.session_state.username, [])
+    if not assigned_images:
+        st.write("No assigned images")
+        return
+    
+    if st.session_state.current_project != selected_project:
+        st.session_state.current_project = selected_project
+        st.session_state.current_image_index = 0
+    
+    current_img_id = assigned_images[st.session_state.current_image_index]
+    img_path = os.path.join(IMAGES_DIR, f"{current_img_id}.png")
+    if os.path.exists(img_path):
+        img = Image.open(img_path)
+        st.image(img, caption=f"Image {st.session_state.current_image_index + 1}/{len(assigned_images)}")
+        
+        # Simple annotation input (for demo; in real app, use a proper annotation tool)
+        class_name = st.selectbox("Class", project['product_list'])
+        x = st.slider("X center", 0.0, 1.0, 0.5)
+        y = st.slider("Y center", 0.0, 1.0, 0.5)
+        w = st.slider("Width", 0.0, 1.0, 0.1)
+        h = st.slider("Height", 0.0, 1.0, 0.1)
+        
+        if st.button("Add Annotation"):
+            if current_img_id not in project['annotations']:
+                project['annotations'][current_img_id] = {}
+            if st.session_state.username not in project['annotations'][current_img_id]:
+                project['annotations'][current_img_id][st.session_state.username] = []
+            project['annotations'][current_img_id][st.session_state.username].append({
+                'class': class_name,
+                'bbox': [x, y, w, h]
+            })
+            save_projects(projects)
+            st.success("Annotation added")
+        
+        if st.button("Complete Image"):
+            # Mark as completed (already handled by presence in annotations)
+            if st.session_state.current_image_index < len(assigned_images) - 1:
+                st.session_state.current_image_index += 1
+                st.rerun()
+            else:
+                st.success("All images completed")
+        
+        if st.session_state.current_image_index == len(assigned_images) - 1 and st.button("Send to Admin"):
+            # Already completed
+            st.success("Sent to admin")
+
+def logout():
+    st.session_state.logged_in = False
+    st.session_state.user_type = None
+    st.session_state.username = None
+    st.session_state.current_project = None
+    st.session_state.current_image_index = 0
+    st.rerun()
 
 def create_project():
     st.subheader("Create Project")
@@ -181,10 +251,16 @@ def manage_projects():
     # Assign access
     new_user = st.text_input("Add User Access")
     if st.button("Add Access"):
-        if new_user not in project['access_users']:
-            project['access_users'].append(new_user)
-            save_projects(projects)
-            st.success("Access added")
+        users = load_users()
+        if new_user in users:
+            if new_user not in project['access_users']:
+                project['access_users'].append(new_user)
+                save_projects(projects)
+                st.success("Access added")
+            else:
+                st.error("User already has access")
+        else:
+            st.error("User not found. Please add the user first.")
     
     # Assign data to users
     st.subheader("Assign Images to Users")
@@ -199,6 +275,9 @@ def manage_projects():
             project['assignments'][user].extend(selected_images)
             save_projects(projects)
             st.success("Assigned")
+            st.rerun()  # To refresh the multiselect
+    else:
+        st.write("No users with access to assign images.")
     
     # View progress
     st.subheader("Progress")
@@ -236,66 +315,6 @@ def download_yolo(project_name, project):
     
     zip_buffer.seek(0)
     st.download_button("Download ZIP", zip_buffer, f"{project_name}_yolo.zip", "application/zip")
-
-def user_page():
-    st.header("User Panel")
-    projects = load_projects()
-    accessible_projects = [p for p in projects if st.session_state.username in projects[p]['access_users']]
-    
-    if not accessible_projects:
-        st.write("No accessible projects")
-        return
-    
-    selected_project = st.selectbox("Select Project", accessible_projects)
-    project = projects[selected_project]
-    
-    st.write("Product List:", project['product_list'])
-    
-    assigned_images = project['assignments'].get(st.session_state.username, [])
-    if not assigned_images:
-        st.write("No assigned images")
-        return
-    
-    if st.session_state.current_project != selected_project:
-        st.session_state.current_project = selected_project
-        st.session_state.current_image_index = 0
-    
-    current_img_id = assigned_images[st.session_state.current_image_index]
-    img_path = os.path.join(IMAGES_DIR, f"{current_img_id}.png")
-    if os.path.exists(img_path):
-        img = Image.open(img_path)
-        st.image(img, caption=f"Image {st.session_state.current_image_index + 1}/{len(assigned_images)}")
-        
-        # Simple annotation input (for demo; in real app, use a proper annotation tool)
-        class_name = st.selectbox("Class", project['product_list'])
-        x = st.slider("X center", 0.0, 1.0, 0.5)
-        y = st.slider("Y center", 0.0, 1.0, 0.5)
-        w = st.slider("Width", 0.0, 1.0, 0.1)
-        h = st.slider("Height", 0.0, 1.0, 0.1)
-        
-        if st.button("Add Annotation"):
-            if current_img_id not in project['annotations']:
-                project['annotations'][current_img_id] = {}
-            if st.session_state.username not in project['annotations'][current_img_id]:
-                project['annotations'][current_img_id][st.session_state.username] = []
-            project['annotations'][current_img_id][st.session_state.username].append({
-                'class': class_name,
-                'bbox': [x, y, w, h]
-            })
-            save_projects(projects)
-            st.success("Annotation added")
-        
-        if st.button("Complete Image"):
-            # Mark as completed (already handled by presence in annotations)
-            if st.session_state.current_image_index < len(assigned_images) - 1:
-                st.session_state.current_image_index += 1
-                st.rerun()
-            else:
-                st.success("All images completed")
-        
-        if st.session_state.current_image_index == len(assigned_images) - 1 and st.button("Send to Admin"):
-            # Already completed
-            st.success("Sent to admin")
 
 if __name__ == "__main__":
     main()
