@@ -1,7 +1,6 @@
 streamlit
-streamlit-image-annotation
-ultralytics
-opencv-python-headless
-Pillow
+pillow
 pandas
 openpyxl
+xlrd
+streamlit-drawable-canvas
