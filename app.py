@@ -89,7 +89,7 @@ def login_page():
 def admin_page():
     st.sidebar.button("Logout", on_click=logout)
     st.header("Admin Panel")
-    menu = st.sidebar.selectbox("Menu", ["Create Project", "Add User", "Manage Projects"])
+    menu = st.sidebar.selectbox("Menu", ["Create Project", "Add User", "Manage Projects", "View Users"])
     
     if menu == "Create Project":
         create_project()
@@ -97,6 +97,8 @@ def admin_page():
         add_user()
     elif menu == "Manage Projects":
         manage_projects()
+    elif menu == "View Users":
+        view_users()
 
 def user_page():
     st.sidebar.button("Logout", on_click=logout)
@@ -301,6 +303,15 @@ def manage_projects():
     if all(len(project['assignments'].get(u, [])) == sum(1 for img in project['assignments'].get(u, []) if img in project['annotations'] and u in project['annotations'][img]) for u in users):
         if st.button("Download YOLO"):
             download_yolo(selected_project, project)
+
+def view_users():
+    st.subheader("All Users")
+    users = load_users()
+    if users:
+        for username in users:
+            st.write(f"- {username}")
+    else:
+        st.write("No users found.")
 
 def download_yolo(project_name, project):
     zip_buffer = BytesIO()
