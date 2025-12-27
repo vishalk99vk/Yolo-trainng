@@ -1,0 +1,5 @@
+streamlit
+streamlit-image-annotation
+ultralytics
+opencv-python-headless
+Pillow
