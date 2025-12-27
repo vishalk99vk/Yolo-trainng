@@ -1,180 +1,282 @@
 import streamlit as st
-from streamlit_image_annotation import detection
-from ultralytics import YOLO
-import os, zipfile, io, sqlite3, hashlib, random
+import os
+import json
+import uuid
+import zipfile
+from io import BytesIO
 import pandas as pd
 from PIL import Image
+import base64
 
-# --- STYLING & UI ---
-st.set_page_config(layout="wide", page_title="Enterprise YOLO Labeller")
+# Constants
+DATA_DIR = "data"
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+PROJECTS_FILE = os.path.join(DATA_DIR, "projects.json")
+IMAGES_DIR = os.path.join(DATA_DIR, "images")
+ANNOTATIONS_DIR = os.path.join(DATA_DIR, "annotations")
 
-st.markdown("""
-    <style>
-    rect.bounding-box { stroke-width: 1px !important; }
-    .stSidebar { background-color: #111; }
-    .main-header { color: #ff4b4b; font-size: 2rem; font-weight: bold; }
-    </style>
-""", unsafe_allow_html=True)
+# Ensure directories exist
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(IMAGES_DIR, exist_ok=True)
+os.makedirs(ANNOTATIONS_DIR, exist_ok=True)
 
-# --- DATABASE ENGINE ---
-conn = sqlite3.connect('yolo_platform.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT)')
-c.execute('CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT, skus TEXT, creator TEXT)')
-c.execute('CREATE TABLE IF NOT EXISTS assignments (p_id INTEGER, username TEXT)')
-conn.commit()
+# Load data functions
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
 
-def hash_pw(password): return hashlib.sha256(str.encode(password)).hexdigest()
+def save_users(users):
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users, f)
 
-# --- AUTHENTICATION ---
+def load_projects():
+    if os.path.exists(PROJECTS_FILE):
+        with open(PROJECTS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_projects(projects):
+    with open(PROJECTS_FILE, 'w') as f:
+        json.dump(projects, f)
+
+# Initialize session state
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
+if 'user_type' not in st.session_state:
+    st.session_state.user_type = None
+if 'username' not in st.session_state:
+    st.session_state.username = None
+if 'current_project' not in st.session_state:
+    st.session_state.current_project = None
+if 'current_image_index' not in st.session_state:
+    st.session_state.current_image_index = 0
 
-if not st.session_state.logged_in:
-    st.sidebar.title("🛂 Access Control")
-    mode = st.sidebar.radio("Entry Type", ["Login", "Register"])
-    user = st.sidebar.text_input("Username")
-    pw = st.sidebar.text_input("Password", type='password')
+# Main app
+def main():
+    st.title("Annotation Tool")
+
+    if not st.session_state.logged_in:
+        login_page()
+    else:
+        if st.session_state.user_type == 'admin':
+            admin_page()
+        elif st.session_state.user_type == 'user':
+            user_page()
+
+def login_page():
+    st.header("Login")
+    user_type = st.selectbox("Select User Type", ["user", "admin"])
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
     
-    if st.sidebar.button("Enter Platform"):
-        hpw = hash_pw(pw)
-        if mode == "Register":
-            role_choice = st.sidebar.selectbox("Register as", ["user", "admin"])
-            try:
-                c.execute('INSERT INTO users VALUES (?,?,?)', (user, hpw, role_choice))
-                conn.commit()
-                st.sidebar.success("Account created! Switch to Login.")
-            except: st.sidebar.error("Username already taken.")
+    if st.button("Login"):
+        users = load_users()
+        if user_type == 'admin' and username == 'admin' and password == 'admin':  # Hardcoded admin for simplicity
+            st.session_state.logged_in = True
+            st.session_state.user_type = 'admin'
+            st.session_state.username = username
+            st.rerun()
+        elif user_type == 'user' and username in users and users[username]['password'] == password:
+            st.session_state.logged_in = True
+            st.session_state.user_type = 'user'
+            st.session_state.username = username
+            st.rerun()
         else:
-            c.execute('SELECT password, role FROM users WHERE username = ?', (user,))
-            res = c.fetchone()
-            if res and res[0] == hpw:
-                st.session_state.logged_in = True
-                st.session_state.username = user
-                st.session_state.role = res[1]
-                st.rerun() # Critical: Refreshes UI to show panels
+            st.error("Invalid credentials")
+
+def admin_page():
+    st.header("Admin Panel")
+    menu = st.sidebar.selectbox("Menu", ["Create Project", "Add User", "Manage Projects"])
+    
+    if menu == "Create Project":
+        create_project()
+    elif menu == "Add User":
+        add_user()
+    elif menu == "Manage Projects":
+        manage_projects()
+
+def create_project():
+    st.subheader("Create Project")
+    project_name = st.text_input("Project Name")
+    product_list = st.text_area("Product List (comma separated)").split(',')
+    product_list = [p.strip() for p in product_list if p.strip()]
+    
+    if st.button("Create"):
+        projects = load_projects()
+        if project_name not in projects:
+            projects[project_name] = {
+                'product_list': product_list,
+                'images': [],
+                'access_users': [],
+                'assignments': {},  # user: [image_ids]
+                'annotations': {}  # image_id: {user: annotations}
+            }
+            save_projects(projects)
+            st.success("Project created")
+        else:
+            st.error("Project already exists")
+
+def add_user():
+    st.subheader("Add User")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    
+    if st.button("Add"):
+        users = load_users()
+        if username not in users:
+            users[username] = {'password': password}
+            save_users(users)
+            st.success("User added")
+        else:
+            st.error("User already exists")
+
+def manage_projects():
+    projects = load_projects()
+    project_names = list(projects.keys())
+    if not project_names:
+        st.write("No projects")
+        return
+    
+    selected_project = st.selectbox("Select Project", project_names)
+    project = projects[selected_project]
+    
+    st.subheader(f"Manage {selected_project}")
+    
+    # Add images
+    uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
+    if uploaded_files:
+        for file in uploaded_files:
+            image_id = str(uuid.uuid4())
+            image_path = os.path.join(IMAGES_DIR, f"{image_id}.png")
+            with open(image_path, 'wb') as f:
+                f.write(file.getvalue())
+            project['images'].append(image_id)
+        save_projects(projects)
+        st.success("Images uploaded")
+    
+    # Product list
+    st.write("Product List:", project['product_list'])
+    
+    # Assign access
+    new_user = st.text_input("Add User Access")
+    if st.button("Add Access"):
+        if new_user not in project['access_users']:
+            project['access_users'].append(new_user)
+            save_projects(projects)
+            st.success("Access added")
+    
+    # Assign data to users
+    st.subheader("Assign Images to Users")
+    users = project['access_users']
+    if users:
+        user = st.selectbox("Select User", users)
+        available_images = [img for img in project['images'] if img not in project['assignments'].get(user, [])]
+        selected_images = st.multiselect("Select Images", available_images)
+        if st.button("Assign"):
+            if user not in project['assignments']:
+                project['assignments'][user] = []
+            project['assignments'][user].extend(selected_images)
+            save_projects(projects)
+            st.success("Assigned")
+    
+    # View progress
+    st.subheader("Progress")
+    for user in users:
+        assigned = len(project['assignments'].get(user, []))
+        completed = 0
+        for img in project['assignments'].get(user, []):
+            if img in project['annotations'] and user in project['annotations'][img]:
+                completed += 1
+        st.write(f"{user}: {completed}/{assigned} completed")
+    
+    # Download YOLO
+    if all(len(project['assignments'].get(u, [])) == sum(1 for img in project['assignments'].get(u, []) if img in project['annotations'] and u in project['annotations'][img]) for u in users):
+        if st.button("Download YOLO"):
+            download_yolo(selected_project, project)
+
+def download_yolo(project_name, project):
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
+        # Images
+        for img_id in project['images']:
+            img_path = os.path.join(IMAGES_DIR, f"{img_id}.png")
+            zip_file.write(img_path, f"images/{img_id}.png")
+        
+        # Annotations
+        for img_id in project['images']:
+            if img_id in project['annotations']:
+                for user, anns in project['annotations'][img_id].items():
+                    txt_content = ""
+                    for ann in anns:
+                        class_id = project['product_list'].index(ann['class'])
+                        x, y, w, h = ann['bbox']  # Assume normalized
+                        txt_content += f"{class_id} {x} {y} {w} {h}\n"
+                    zip_file.writestr(f"labels/{img_id}.txt", txt_content)
+    
+    zip_buffer.seek(0)
+    st.download_button("Download ZIP", zip_buffer, f"{project_name}_yolo.zip", "application/zip")
+
+def user_page():
+    st.header("User Panel")
+    projects = load_projects()
+    accessible_projects = [p for p in projects if st.session_state.username in projects[p]['access_users']]
+    
+    if not accessible_projects:
+        st.write("No accessible projects")
+        return
+    
+    selected_project = st.selectbox("Select Project", accessible_projects)
+    project = projects[selected_project]
+    
+    st.write("Product List:", project['product_list'])
+    
+    assigned_images = project['assignments'].get(st.session_state.username, [])
+    if not assigned_images:
+        st.write("No assigned images")
+        return
+    
+    if st.session_state.current_project != selected_project:
+        st.session_state.current_project = selected_project
+        st.session_state.current_image_index = 0
+    
+    current_img_id = assigned_images[st.session_state.current_image_index]
+    img_path = os.path.join(IMAGES_DIR, f"{current_img_id}.png")
+    if os.path.exists(img_path):
+        img = Image.open(img_path)
+        st.image(img, caption=f"Image {st.session_state.current_image_index + 1}/{len(assigned_images)}")
+        
+        # Simple annotation input (for demo; in real app, use a proper annotation tool)
+        class_name = st.selectbox("Class", project['product_list'])
+        x = st.slider("X center", 0.0, 1.0, 0.5)
+        y = st.slider("Y center", 0.0, 1.0, 0.5)
+        w = st.slider("Width", 0.0, 1.0, 0.1)
+        h = st.slider("Height", 0.0, 1.0, 0.1)
+        
+        if st.button("Add Annotation"):
+            if current_img_id not in project['annotations']:
+                project['annotations'][current_img_id] = {}
+            if st.session_state.username not in project['annotations'][current_img_id]:
+                project['annotations'][current_img_id][st.session_state.username] = []
+            project['annotations'][current_img_id][st.session_state.username].append({
+                'class': class_name,
+                'bbox': [x, y, w, h]
+            })
+            save_projects(projects)
+            st.success("Annotation added")
+        
+        if st.button("Complete Image"):
+            # Mark as completed (already handled by presence in annotations)
+            if st.session_state.current_image_index < len(assigned_images) - 1:
+                st.session_state.current_image_index += 1
+                st.rerun()
             else:
-                st.sidebar.error("Invalid credentials.")
-    st.stop()
-
-# --- LOGGED IN UI ---
-st.sidebar.write(f"Logged in as: **{st.session_state.username}** ({st.session_state.role})")
-if st.sidebar.button("Logout"):
-    st.session_state.logged_in = False
-    st.rerun()
-
-# Logic to determine which panel to show
-if st.session_state.role == "admin":
-    panel_choice = st.sidebar.selectbox("Current View", ["Admin Control Panel", "User Labeling Workspace"])
-else:
-    panel_choice = "User Labeling Workspace"
-
-# ==========================================
-# 🛑 ADMIN PANEL
-# ==========================================
-if panel_choice == "Admin Control Panel":
-    st.markdown("<div class='main-header'>🛠️ Admin Management Panel</div>", unsafe_allow_html=True)
-    
-    tab1, tab2 = st.tabs(["🚀 Project Creation", "👥 Assignments & Management"])
-    
-    with tab1:
-        p_name = st.text_input("Project Name")
-        sku_type = st.radio("SKU Input Method", ["Manual Entry", "Excel/CSV Upload"])
+                st.success("All images completed")
         
-        sku_list = []
-        if sku_type == "Manual Entry":
-            sku_raw = st.text_area("SKUs (Comma separated)")
-            sku_list = [x.strip() for x in sku_raw.split(",") if x.strip()]
-        else:
-            uploaded_sku = st.file_uploader("Upload SKU File", type=['xlsx', 'csv'])
-            if uploaded_sku:
-                df = pd.read_csv(uploaded_sku) if uploaded_sku.name.endswith('.csv') else pd.read_excel(uploaded_sku)
-                sku_list = df.iloc[:, 0].dropna().astype(str).tolist()
+        if st.session_state.current_image_index == len(assigned_images) - 1 and st.button("Send to Admin"):
+            # Already completed
+            st.success("Sent to admin")
 
-        up_images = st.file_uploader("Upload Image Dataset", accept_multiple_files=True)
-        
-        if st.button("Create Project"):
-            if p_name and sku_list and up_images:
-                sku_str = ",".join(sku_list)
-                c.execute('INSERT INTO projects (name, skus, creator) VALUES (?,?,?)', (p_name, sku_str, st.session_state.username))
-                pid = c.lastrowid
-                conn.commit()
-                
-                # Save Images
-                path = f"data/proj_{pid}"
-                os.makedirs(path, exist_ok=True)
-                for f in up_images:
-                    with open(os.path.join(path, f.name), "wb") as out:
-                        out.write(f.getvalue())
-                st.success(f"Project '{p_name}' created. All files uploaded successfully!")
-            else: st.error("Please provide project name, SKUs, and images.")
-
-    with tab2:
-        st.subheader("Manage User Access")
-        c.execute('SELECT id, name FROM projects')
-        all_p = c.fetchall()
-        c.execute('SELECT username FROM users WHERE role = "user"')
-        all_u = [u[0] for u in c.fetchall()]
-        
-        if all_p and all_u:
-            sel_p = st.selectbox("Select Project", all_p, format_func=lambda x: x[1])
-            sel_u = st.selectbox("Select User", all_u)
-            if st.button("Assign Project to User"):
-                c.execute('INSERT INTO assignments VALUES (?,?)', (sel_p[0], sel_u))
-                conn.commit()
-                st.success(f"Assigned {sel_p[1]} to {sel_u}")
-        else: st.info("Create a project and register users to see assignment options.")
-
-# ==========================================
-# 🖍️ USER PANEL
-# ==========================================
-else:
-    st.markdown("<div class='main-header'>🖍️ Labeling Workspace</div>", unsafe_allow_html=True)
-    
-    # Admins see all projects; Users see assigned ones
-    if st.session_state.role == "admin":
-        c.execute('SELECT id, name, skus FROM projects')
-    else:
-        c.execute('''SELECT p.id, p.name, p.skus FROM projects p 
-                     JOIN assignments a ON p.id = a.p_id WHERE a.username = ?''', (st.session_state.username,))
-    
-    assigned_projs = c.fetchall()
-    
-    if not assigned_projs:
-        st.warning("No projects assigned to you. Contact the Admin.")
-    else:
-        project = st.selectbox("Current Project", assigned_projs, format_func=lambda x: x[1])
-        pid, pname, pskus = project
-        labels = pskus.split(",")
-        p_path = f"data/proj_{pid}"
-        
-        if os.path.exists(p_path):
-            img_list = os.listdir(p_path)
-            img_name = st.selectbox("Select Image", img_list)
-            
-            # Workspace Controls
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                rot = st.slider("Rotate Image", 0, 270, 0, 90)
-                st.info("💡 Hint: Zoom with Ctrl + Mousewheel")
-                
-            with col2:
-                # Image Processing
-                full_path = os.path.join(p_path, img_name)
-                with Image.open(full_path) as im:
-                    rotated = im.rotate(-rot, expand=True)
-                    temp_p = "temp_view.jpg"
-                    rotated.save(temp_p)
-                
-                # Annotation (Thin lines via CSS)
-                new_ann = detection(image_path=temp_p, label_list=labels, key=f"lab_{pid}_{img_name}_{rot}")
-                
-            # Export (ZIP Format)
-            if st.button("📦 Build YOLO Dataset ZIP"):
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED) as z:
-                    z.writestr("data.yaml", f"nc: {len(labels)}\nnames: {labels}\ntrain: images/train\nval: images/val")
-                    # (Simplified export for production)
-                    for n in img_list:
-                        z.write(os.path.join(p_path, n), f"images/train/{n}")
-                st.download_button("📥 Download My Work", buf.getvalue(), f"{pname}_labels.zip")
+if __name__ == "__main__":
+    main()
