@@ -113,6 +113,14 @@ def user_page():
     
     st.write("Product List:", project['product_list'])
     
+    # Show all users with access to this project
+    st.subheader("Users with Access to this Project:")
+    if project['access_users']:
+        for user in project['access_users']:
+            st.write(f"- {user}")
+    else:
+        st.write("No users have access.")
+    
     assigned_images = project['assignments'].get(st.session_state.username, [])
     if not assigned_images:
         st.write("No assigned images")
