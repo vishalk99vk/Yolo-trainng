@@ -313,10 +313,12 @@ def manage_projects():
     
     st.subheader(f"Manage {selected_project}")
     
-    # Add images
+    # Add images with date selection
+    st.subheader("Upload Images")
     uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
-    if uploaded_files:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+    selected_date = st.date_input("Select Upload Date", value=datetime.now().date())
+    date_str = selected_date.strftime("%Y-%m-%d")
+    if uploaded_files and st.button("Upload"):
         for file in uploaded_files:
             image_id = str(uuid.uuid4())
             image_path = os.path.join(IMAGES_DIR, f"{image_id}.png")
@@ -325,6 +327,7 @@ def manage_projects():
             project['images'].append({'id': image_id, 'date': date_str})
         save_projects(projects)
         st.success("Images uploaded")
+        st.rerun()  # Refresh to clear uploader
     
     # Product list
     st.write("Product List:", project['product_list'])
@@ -349,14 +352,17 @@ def manage_projects():
     if users:
         user = st.selectbox("Select User", users)
         available_images = [img['id'] for img in project['images'] if img['id'] not in project['assignments'].get(user, [])]
-        selected_images = st.multiselect("Select Images", available_images)
-        if st.button("Assign"):
-            if user not in project['assignments']:
-                project['assignments'][user] = []
-            project['assignments'][user].extend(selected_images)
-            save_projects(projects)
-            st.success("Assigned")
-            st.rerun()  # To refresh the multiselect
+        selected_images = st.multiselect("Select Images to Assign", available_images, key="assign_multiselect")
+        if st.button("Assign Selected Images"):
+            if selected_images:
+                if user not in project['assignments']:
+                    project['assignments'][user] = []
+                project['assignments'][user].extend(selected_images)
+                save_projects(projects)
+                st.success(f"Assigned {len(selected_images)} images to {user}")
+                st.rerun()  # Refresh to update available images
+            else:
+                st.warning("No images selected")
     else:
         st.write("No users with access to assign images.")
     
