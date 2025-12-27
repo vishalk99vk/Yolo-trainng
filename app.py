@@ -3,6 +3,7 @@ import os
 import json
 import uuid
 import zipfile
+import time
 from io import BytesIO
 import pandas as pd
 from PIL import Image
@@ -16,12 +17,11 @@ IMAGES_DIR = os.path.join(DATA_DIR, "images")
 for d in [DATA_DIR, IMAGES_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# --- DATABASE HELPERS ---
 def load_json(f):
-    try:
-        if os.path.exists(f):
+    if os.path.exists(f):
+        try:
             with open(f, 'r') as file: return json.load(file)
-    except: return {}
+        except: return {}
     return {}
 
 def save_json(f, d):
@@ -31,15 +31,13 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-# --- MAIN ROUTER ---
 def main():
-    st.set_page_config(page_title="YOLO Annotator Safe-Mode", layout="wide")
+    st.set_page_config(page_title="YOLO Annotator Final", layout="wide")
     
-    # Ensure canvas is imported
     try:
         from streamlit_drawable_canvas import st_canvas
     except ImportError:
-        st.error("Run: pip install streamlit-drawable-canvas")
+        st.error("Please install: pip install streamlit-drawable-canvas")
         return
 
     if 'logged_in' not in st.session_state: st.session_state.logged_in = False
@@ -52,9 +50,8 @@ def main():
         else:
             user_ui()
 
-# --- LOGIN ---
 def login_ui():
-    st.header("📦 Product Tagger")
+    st.header("📦 YOLO Manual Tagger")
     with st.form("login"):
         u_type = st.selectbox("Role", ["user", "admin"])
         u_name = st.text_input("Username")
@@ -67,68 +64,63 @@ def login_ui():
             elif u_name in users and users[u_name]['password'] == u_pass:
                 st.session_state.update({"logged_in": True, "user_type": 'user', "username": u_name})
                 st.rerun()
-            else: st.error("Invalid credentials")
+            else: st.error("Access Denied")
 
 # --- ADMIN PANEL ---
 def admin_ui():
     st.sidebar.title("Admin")
     st.sidebar.button("Logout", on_click=logout)
-    menu = st.sidebar.radio("Go to", ["Projects", "Assignments", "Export"])
-    
+    menu = st.sidebar.radio("Menu", ["Setup", "Assign", "Export"])
     projs = load_json(PROJECTS_FILE)
-    users_data = load_json(USERS_FILE)
+    users = load_json(USERS_FILE)
 
-    if menu == "Projects":
-        st.subheader("Create Project")
+    if menu == "Setup":
         p_name = st.text_input("Project Name")
-        prod_file = st.file_uploader("Upload Product List (Excel/CSV)", type=['csv', 'xlsx'])
-        if st.button("Create") and p_name and prod_file:
-            df = pd.read_csv(prod_file) if prod_file.name.endswith('.csv') else pd.read_excel(prod_file)
+        p_file = st.file_uploader("Products (CSV/XLSX)")
+        if st.button("Create") and p_name and p_file:
+            df = pd.read_csv(p_file) if p_file.name.endswith('.csv') else pd.read_excel(p_file)
             p_list = [str(x).strip() for x in df.iloc[:, 0].dropna().tolist()]
             projs[p_name] = {'product_list': p_list, 'images': [], 'access_users': [], 'assignments': {}, 'annotations': {}, 'statuses': {}}
             save_json(PROJECTS_FILE, projs)
             st.success("Project Created")
         
         st.divider()
-        st.subheader("Add User")
         un, pw = st.text_input("User"), st.text_input("Pass")
-        if st.button("Add User") and un and pw:
-            users_data[un] = {"password": pw}
-            save_json(USERS_FILE, users_data)
+        if st.button("Add Worker") and un and pw:
+            users[un] = {"password": pw}
+            save_json(USERS_FILE, users)
 
-    elif menu == "Assignments":
+    elif menu == "Assign":
         if not projs: return
-        sel_p = st.selectbox("Select Project", list(projs.keys()))
+        sel_p = st.selectbox("Project", list(projs.keys()))
         p = projs[sel_p]
-        
-        up = st.file_uploader("Upload Images", accept_multiple_files=True)
-        if up and st.button("Save Images"):
+        up = st.file_uploader("Images", accept_multiple_files=True)
+        if up and st.button("Upload"):
             for f in up:
                 id = str(uuid.uuid4())
                 Image.open(f).save(os.path.join(IMAGES_DIR, f"{id}.png"))
                 p['images'].append({'id': id})
             save_json(PROJECTS_FILE, projs)
-
+        
         st.divider()
         all_assigned = []
         for u in p['assignments']: all_assigned.extend(p['assignments'][u])
         avail = [im['id'] for im in p['images'] if im['id'] not in all_assigned]
-        
         if avail:
-            target_u = st.selectbox("Assign to Worker", list(users_data.keys()))
+            target = st.selectbox("Worker", list(users.keys()))
             num = st.number_input("Count", 1, len(avail), min(10, len(avail)))
-            if st.button("Confirm Bulk Assignment"):
-                if target_u not in p['access_users']: p['access_users'].append(target_u)
-                p['assignments'].setdefault(target_u, []).extend(avail[:num])
+            if st.button("Assign"):
+                if target not in p['access_users']: p['access_users'].append(target)
+                p['assignments'].setdefault(target, []).extend(avail[:num])
                 save_json(PROJECTS_FILE, projs)
                 st.rerun()
 
     elif menu == "Export":
         sel_p = st.selectbox("Export", list(projs.keys()))
-        if st.button("Download ZIP"):
+        if st.button("Download"):
             download_yolo(sel_p, projs[sel_p])
 
-# --- USER PANEL (CRASH-PROOFED) ---
+# --- USER PANEL (THE FIX) ---
 def user_ui():
     from streamlit_drawable_canvas import st_canvas
     st.sidebar.button("Logout", on_click=logout)
@@ -136,75 +128,78 @@ def user_ui():
     projs = load_json(PROJECTS_FILE)
     my_projs = [n for n, p in projs.items() if st.session_state.username in p['access_users']]
     
-    if not my_projs: st.info("No tasks."); return
+    if not my_projs: st.info("No work assigned."); return
     p_name = st.selectbox("Project", my_projs)
     p = projs[p_name]
     my_imgs = p['assignments'].get(st.session_state.username, [])
     pending = [i for i in my_imgs if p.get('statuses', {}).get(i, {}).get(st.session_state.username) not in ["Completed", "Skipped"]]
     
-    if not pending: st.success("All Done!"); return
+    if not pending: st.success("Queue empty!"); return
 
     img_id = pending[0]
     img_path = os.path.join(IMAGES_DIR, f"{img_id}.png")
     
     if os.path.exists(img_path):
-        # RESIZE IMAGE
-        raw_img = Image.open(img_path).convert("RGB")
+        # 1. FORCE RESIZE to prevent memory/serialization error
+        # High resolution images often crash st_canvas
+        img_obj = Image.open(img_path).convert("RGB")
         zoom = st.sidebar.slider("Zoom", 0.5, 2.0, 1.0, 0.1)
-        canvas_h = int(600 * zoom)
-        canvas_w = int(canvas_h * (raw_img.width / raw_img.height))
-        resized_img = raw_img.resize((canvas_w, canvas_h))
         
-        # SAFE INITIAL DRAWING
-        # Python 3.13 Crash Fix: Ensure initial_drawing is never a malformed object
-        init_draw = st.session_state.get(f"draft_{img_id}")
-        if not isinstance(init_draw, dict) or "objects" not in init_draw:
-            init_draw = None
+        # Standardize canvas height to 600, then adjust width based on aspect ratio
+        canvas_h = int(600 * zoom)
+        aspect_ratio = img_obj.width / img_obj.height
+        canvas_w = int(canvas_h * aspect_ratio)
+        
+        # Limit width if it's an extremely wide image to prevent canvas crash
+        if canvas_w > 1200:
+            canvas_w = 1200
+            canvas_h = int(canvas_w / aspect_ratio)
 
+        resized_img = img_obj.resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+        
         col_ui, col_canvas = st.columns([1, 4])
         with col_ui:
-            sel_cls = st.selectbox("Product", p['product_list'], key=f"sel_{img_id}")
+            sel_cls = st.selectbox("Product", p['product_list'], key=f"cls_{img_id}")
             if st.button("Save & Next", use_container_width=True):
-                st.session_state[f"sub_{img_id}"] = True
-            if st.button("Skip", use_container_width=True):
+                st.session_state[f"go_{img_id}"] = True
+            if st.button("Skip Image", use_container_width=True):
                 p.setdefault('statuses', {}).setdefault(img_id, {})[st.session_state.username] = "Skipped"
                 save_json(PROJECTS_FILE, projs)
                 st.rerun()
 
         with col_canvas:
-            # UNIQUE KEY PER IMAGE TO PREVENT CACHE ERRORS
+            # UNIQUE KEY FIX: Adding a timestamp forces a clean re-render if it fails
+            canvas_key = f"canvas_{img_id}_{st.session_state.get('canvas_ver', 0)}"
+            
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_width=2,
                 stroke_color="#FF0000",
                 background_image=resized_img,
-                height=canvas_h, width=canvas_w,
+                height=canvas_h, 
+                width=canvas_w,
                 drawing_mode="rect",
-                initial_drawing=init_draw,
                 display_toolbar=True,
-                update_freq=1000,
-                key=f"canvas_img_{img_id}"
+                key=canvas_key
             )
-            # Auto-save current state
-            if canvas_result.json_data:
-                st.session_state[f"draft_{img_id}"] = canvas_result.json_data
 
-        if st.session_state.get(f"sub_{img_id}"):
+        if st.session_state.get(f"go_{img_id}"):
             if canvas_result.json_data and canvas_result.json_data.get("objects"):
-                yolo_anns = []
+                anns = []
                 for o in canvas_result.json_data["objects"]:
                     if o["type"] == "rect":
                         wn, hn = o["width"] / canvas_w, o["height"] / canvas_h
                         xc, yc = (o["left"] / canvas_w) + (wn/2), (o["top"] / canvas_h) + (hn/2)
-                        yolo_anns.append({'class': sel_cls, 'bbox': [xc, yc, wn, hn]})
+                        anns.append({'class': sel_cls, 'bbox': [xc, yc, wn, hn]})
                 
-                p['annotations'].setdefault(img_id, {})[st.session_state.username] = yolo_anns
+                p['annotations'].setdefault(img_id, {})[st.session_state.username] = anns
                 p.setdefault('statuses', {}).setdefault(img_id, {})[st.session_state.username] = "Completed"
                 save_json(PROJECTS_FILE, projs)
-                st.session_state.pop(f"draft_{img_id}", None)
-                st.session_state.pop(f"sub_{img_id}", None)
+                st.session_state[f"go_{img_id}"] = False
                 st.rerun()
-            else: st.warning("Draw a box first!")
+            else:
+                st.warning("Please draw at least one box.")
+                st.session_state[f"go_{img_id}"] = False
 
 def download_yolo(name, p):
     buf = BytesIO()
@@ -214,15 +209,15 @@ def download_yolo(name, p):
             img_p = os.path.join(IMAGES_DIR, f"{iid}.png")
             if iid in p['annotations'] and os.path.exists(img_p):
                 z.write(img_p, f"images/{iid}.png")
-                labels = ""
-                for u, anns in p['annotations'][iid].items():
+                lbl = ""
+                for u, ans in p['annotations'][iid].items():
                     if p['statuses'].get(iid, {}).get(u) == "Completed":
-                        for a in anns:
+                        for a in ans:
                             idx = p['product_list'].index(a['class'])
-                            labels += f"{idx} {' '.join([f'{v:.6f}' for v in a['bbox']])}\n"
-                if labels: z.writestr(f"labels/{iid}.txt", labels)
+                            lbl += f"{idx} {' '.join([f'{v:.6f}' for v in a['bbox']])}\n"
+                if lbl: z.writestr(f"labels/{iid}.txt", lbl)
         z.writestr("data.yaml", f"names: {p['product_list']}\nnc: {len(p['product_list'])}\ntrain: images\nval: images")
-    st.download_button("Download Now", buf.getvalue(), f"{name}_yolo.zip")
+    st.download_button("Download", buf.getvalue(), f"{name}_yolo.zip")
 
 if __name__ == "__main__":
     main()
