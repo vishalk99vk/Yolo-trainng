@@ -308,8 +308,8 @@ def view_users():
     st.subheader("All Users")
     users = load_users()
     if users:
-        for username in users:
-            st.write(f"- {username}")
+        for username, data in users.items():
+            st.write(f"Username: {username}, Password: {data['password']}")
     else:
         st.write("No users found.")
 
