@@ -3,3 +3,5 @@ streamlit-image-annotation
 ultralytics
 opencv-python-headless
 Pillow
+pandas
+openpyxl
