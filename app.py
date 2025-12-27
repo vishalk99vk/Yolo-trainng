@@ -162,59 +162,62 @@ def user_page():
                 
                 # Annotation with drawing or sliders
                 if CANVAS_AVAILABLE:
-                    class_name = st.selectbox(f"Select Class for {img_id}", project['product_list'], key=f"class_{img_id}")
-                    
-                    # Canvas for drawing
-                    canvas_result = st_canvas(
-                        fill_color="rgba(255, 165, 0, 0.3)",  # Fixed fill color with some opacity
-                        stroke_width=2,
-                        stroke_color="#000000",
-                        background_color="#eee",
-                        background_image=img,
-                        update_streamlit=True,
-                        height=img.height,
-                        width=img.width,
-                        drawing_mode="rect",
-                        key=f"canvas_{img_id}",
-                    )
-                    
-                    if canvas_result.json_data is not None:
-                        objects = canvas_result.json_data["objects"]
-                        if objects:
-                            st.write("Detected rectangles:")
-                            for obj in objects:
-                                if obj["type"] == "rect":
-                                    left = obj["left"] / img.width
-                                    top = obj["top"] / img.height
-                                    width = obj["width"] / img.width
-                                    height = obj["height"] / img.height
-                                    x_center = left + width / 2
-                                    y_center = top + height / 2
-                                    st.write(f"Class: {class_name}, BBox: ({x_center:.3f}, {y_center:.3f}, {width:.3f}, {height:.3f})")
-                    
-                    if st.button(f"Save Annotations for {img_id}", key=f"save_{img_id}"):
+                    try:
+                        class_name = st.selectbox(f"Select Class for {img_id}", project['product_list'], key=f"class_{img_id}")
+                        
+                        # Canvas for drawing
+                        canvas_result = st_canvas(
+                            fill_color="rgba(255, 165, 0, 0.3)",  # Fixed fill color with some opacity
+                            stroke_width=2,
+                            stroke_color="#000000",
+                            background_color="#eee",
+                            background_image=img,
+                            update_streamlit=True,
+                            height=img.height,
+                            width=img.width,
+                            drawing_mode="rect",
+                            key=f"canvas_{img_id}",
+                        )
+                        
                         if canvas_result.json_data is not None:
                             objects = canvas_result.json_data["objects"]
-                            annotations = []
-                            for obj in objects:
-                                if obj["type"] == "rect":
-                                    left = obj["left"] / img.width
-                                    top = obj["top"] / img.height
-                                    width = obj["width"] / img.width
-                                    height = obj["height"] / img.height
-                                    x_center = left + width / 2
-                                    y_center = top + height / 2
-                                    annotations.append({
-                                        'class': class_name,
-                                        'bbox': [x_center, y_center, width, height]
-                                    })
-                            if img_id not in project['annotations']:
-                                project['annotations'][img_id] = {}
-                            project['annotations'][img_id][st.session_state.username] = annotations
-                            save_projects(projects)
-                            st.success(f"Annotations saved for {img_id}")
-                else:
-                    st.warning("Drawing canvas not available. Install 'streamlit-drawable-canvas' for drawing. Using sliders instead.")
+                            if objects:
+                                st.write("Detected rectangles:")
+                                for obj in objects:
+                                    if obj["type"] == "rect":
+                                        left = obj["left"] / img.width
+                                        top = obj["top"] / img.height
+                                        width = obj["width"] / img.width
+                                        height = obj["height"] / img.height
+                                        x_center = left + width / 2
+                                        y_center = top + height / 2
+                                        st.write(f"Class: {class_name}, BBox: ({x_center:.3f}, {y_center:.3f}, {width:.3f}, {height:.3f})")
+                        
+                        if st.button(f"Save Annotations for {img_id}", key=f"save_{img_id}"):
+                            if canvas_result.json_data is not None:
+                                objects = canvas_result.json_data["objects"]
+                                annotations = []
+                                for obj in objects:
+                                    if obj["type"] == "rect":
+                                        left = obj["left"] / img.width
+                                        top = obj["top"] / img.height
+                                        width = obj["width"] / img.width
+                                        height = obj["height"] / img.height
+                                        x_center = left + width / 2
+                                        y_center = top + height / 2
+                                        annotations.append({
+                                            'class': class_name,
+                                            'bbox': [x_center, y_center, width, height]
+                                        })
+                                if img_id not in project['annotations']:
+                                    project['annotations'][img_id] = {}
+                                project['annotations'][img_id][st.session_state.username] = annotations
+                                save_projects(projects)
+                                st.success(f"Annotations saved for {img_id}")
+                    except Exception as e:
+                        st.warning(f"Drawing canvas failed: {str(e)}. Using sliders instead.")
+                        CANVAS_AVAILABLE = False  # Fallback for this session
+                if not CANVAS_AVAILABLE:
                     # Simple annotation input (for demo; in real app, use a proper annotation tool)
                     class_name = st.selectbox(f"Class for {img_id}", project['product_list'], key=f"class_{img_id}")
                     x = st.slider(f"X center for {img_id}", 0.0, 1.0, 0.5, key=f"x_{img_id}")
