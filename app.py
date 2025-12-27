@@ -9,7 +9,7 @@ import pandas as pd
 from PIL import Image
 
 st.set_page_config(layout="wide", page_title="YOLO SKU Annotator")
-st.title("📦 YOLO SKU Annotator with Excel Import")
+st.title("📦 YOLO SKU Dataset Creator")
 
 # --- SIDEBAR: SKU MANAGEMENT ---
 st.sidebar.header("1. SKU Configuration")
@@ -24,25 +24,20 @@ else:
     sku_file = st.sidebar.file_uploader("Upload SKU List", type=['xlsx', 'csv'])
     if sku_file:
         try:
-            if sku_file.name.endswith('.csv'):
-                df_sku = pd.read_csv(sku_file)
-            else:
-                df_sku = pd.read_excel(sku_file)
-            
-            # Use the first column as SKU names
+            df_sku = pd.read_csv(sku_file) if sku_file.name.endswith('.csv') else pd.read_excel(sku_file)
             label_list = df_sku.iloc[:, 0].dropna().astype(str).tolist()
             st.sidebar.success(f"Loaded {len(label_list)} SKUs")
         except Exception as e:
-            st.sidebar.error(f"Error reading file: {e}")
+            st.sidebar.error(f"Error: {e}")
 
 if not label_list:
-    st.warning("Please add at least one SKU name in the sidebar to begin.")
+    st.warning("Please define your SKUs in the sidebar to begin.")
     st.stop()
 
-# --- AI MODEL LOADING ---
+# --- AI MODEL ---
 @st.cache_resource
 def load_model():
-    return YOLO("yolo11n.pt")
+    return YOLO("yolo11n.pt") 
 
 model = load_model()
 
@@ -51,7 +46,7 @@ if 'annotations' not in st.session_state:
 
 # --- STEP 1: UPLOAD IMAGES ---
 st.header("Step 1: Upload Raw Images")
-uploaded_files = st.file_uploader("Upload images", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Drop images here", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
 if uploaded_files:
     os.makedirs("temp_images", exist_ok=True)
@@ -60,26 +55,22 @@ if uploaded_files:
             file.write(f.getvalue())
 
     # --- STEP 2: ANNOTATE ---
-    st.header("Step 2: Annotate Images")
-    img_name = st.selectbox("Select image to label", [f.name for f in uploaded_files])
+    st.header("Step 2: Annotation")
+    img_name = st.selectbox("Current Image", [f.name for f in uploaded_files])
     target_path = os.path.join("temp_images", img_name)
 
-    # AI Suggestion Button
     if st.button("✨ Get AI Suggestions"):
         results = model.predict(target_path, conf=0.25)[0]
-        suggested_bboxes = []
-        suggested_labels = []
+        bboxes, labels = [], []
         for box in results.boxes:
             x, y, x2, y2 = box.xyxy[0].tolist()
-            w, h = x2 - x, y2 - y
-            suggested_bboxes.append([int(x), int(y), int(w), int(h)])
-            suggested_labels.append(0) # Defaults to first SKU in your list
-        st.session_state[f"pre_{img_name}"] = {"bboxes": suggested_bboxes, "labels": suggested_labels}
+            bboxes.append([int(x), int(y), int(x2-x), int(y2-y)])
+            labels.append(0) 
+        st.session_state[f"pre_{img_name}"] = {"bboxes": bboxes, "labels": labels}
         st.rerun()
 
     pre_data = st.session_state.get(f"pre_{img_name}", {"bboxes": [], "labels": []})
     
-    # Annotation Component
     new_ann = detection(
         image_path=target_path, 
         label_list=label_list, 
@@ -91,38 +82,39 @@ if uploaded_files:
     if new_ann is not None:
         st.session_state.annotations[img_name] = new_ann
 
-    # --- STEP 3: EXPORT (YOLO STRUCTURE) ---
-    st.header("Step 3: Download YOLO Dataset")
-    if st.button("🚀 Prepare ZIP for Training"):
+    # --- STEP 3: EXPORT (SAFE SPLIT) ---
+    st.header("Step 3: Export")
+    if st.button("🚀 Prepare YOLO ZIP"):
         if not st.session_state.annotations:
-            st.error("Please label at least one image.")
+            st.error("Label images before exporting.")
         else:
             zip_buffer = io.BytesIO()
             all_imgs = list(st.session_state.annotations.keys())
             random.shuffle(all_imgs)
-            split = int(len(all_imgs) * 0.8)
-            train_set, val_set = all_imgs[:split], all_imgs[split:]
+            
+            # Safe logic to prevent empty train/val folders
+            total = len(all_imgs)
+            split_idx = max(1, int(total * 0.8)) if total > 1 else 1
+            if split_idx == total and total > 1: split_idx -= 1
+            
+            train_names = all_imgs[:split_idx]
+            val_names = all_imgs[split_idx:] if total > 1 else []
 
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zf:
-                # 1. Generate data.yaml
-                yaml_str = f"train: images/train\nval: images/val\nnc: {len(label_list)}\nnames: {label_list}"
-                zf.writestr("data.yaml", yaml_str)
+                zf.writestr("data.yaml", f"train: images/train\nval: images/val\nnc: {len(label_list)}\nnames: {label_list}")
 
                 for name in all_imgs:
-                    subtype = "train" if name in train_set else "val"
-                    # 2. Add Images
-                    zf.write(os.path.join("temp_images", name), f"images/{subtype}/{name}")
+                    stype = "train" if name in train_names else "val"
+                    zf.write(os.path.join("temp_images", name), f"images/{stype}/{name}")
                     
-                    # 3. Add Labels (.txt)
                     img = Image.open(os.path.join("temp_images", name))
-                    w_img, h_img = img.size
-                    yolo_lines = []
+                    w, h = img.size
+                    lines = []
                     for a in st.session_state.annotations[name]:
-                        x, y, w, h = a['bbox']
+                        bx = a['bbox']
                         idx = label_list.index(a['label'])
-                        # YOLO formula: class_id x_center y_center width height (normalized)
-                        yolo_lines.append(f"{idx} {(x+w/2)/w_img:.6f} {(y+h/2)/h_img:.6f} {w/w_img:.6f} {h/h_img:.6f}")
-                    zf.writestr(f"labels/{subtype}/{os.path.splitext(name)[0]}.txt", "\n".join(yolo_lines))
+                        lines.append(f"{idx} {(bx[0]+bx[2]/2)/w:.6f} {(bx[1]+bx[3]/2)/h:.6f} {bx[2]/w:.6f} {bx[3]/h:.6f}")
+                    zf.writestr(f"labels/{stype}/{os.path.splitext(name)[0]}.txt", "\n".join(lines))
 
-            st.success("Dataset structure complete!")
-            st.download_button("📥 Download ZIP", zip_buffer.getvalue(), "yolo_dataset.zip")
+            st.success(f"Ready: {len(train_names)} Train, {len(val_names)} Val")
+            st.download_button("📥 Download YOLO ZIP", zip_buffer.getvalue(), "yolo_dataset.zip")
