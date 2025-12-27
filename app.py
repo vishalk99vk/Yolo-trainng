@@ -9,7 +9,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 from datetime import datetime
 
-# 1. Safe Import for Canvas Component
+# 1. Safe Import
 try:
     from streamlit_drawable_canvas import st_canvas
     HAS_CANVAS_LIB = True
@@ -34,12 +34,19 @@ def load_json(file_path):
 def save_json(file_path, data):
     with open(file_path, 'w') as f: json.dump(data, f)
 
-def get_image_base64(img):
-    """Fixes the AttributeError in st_canvas by providing a base64 string"""
+def prepare_canvas_image(img, target_height):
+    """
+    Resizes image to target height while maintaining aspect ratio,
+    then converts to base64 to bypass streamlit-canvas internal errors.
+    """
+    aspect_ratio = img.width / img.height
+    target_width = int(target_height * aspect_ratio)
+    resized_img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+    
     buffered = BytesIO()
-    img.save(buffered, format="PNG")
+    resized_img.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
-    return f"data:image/png;base64,{img_str}"
+    return f"data:image/png;base64,{img_str}", target_width, target_height
 
 # --- SESSION STATE ---
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
@@ -50,7 +57,7 @@ def logout():
     st.session_state.logged_in = False
     st.rerun()
 
-# --- MAIN APP LOGIC ---
+# --- MAIN APP ---
 def main():
     st.set_page_config(page_title="YOLO Annotator", layout="wide")
     if not st.session_state.logged_in:
@@ -79,7 +86,6 @@ def login_page():
             else:
                 st.error("Invalid credentials")
 
-# --- ADMIN PANEL ---
 def admin_page():
     st.sidebar.title(f"Admin: {st.session_state.username}")
     st.sidebar.button("Logout", on_click=logout)
@@ -97,14 +103,13 @@ def admin_page():
                     p_list = [str(x).strip() for x in df.iloc[:, 0].dropna().tolist()]
                     projs[p_name] = {'product_list': p_list, 'images': [], 'access_users': [], 'assignments': {}, 'annotations': {}, 'statuses': {}}
                     save_json(PROJECTS_FILE, projs)
-                    st.success(f"Project created with {len(p_list)} classes.")
+                    st.success("Project created!")
                     st.rerun()
 
         if projs:
             sel_p = st.selectbox("Select Project", list(projs.keys()))
             p = projs[sel_p]
             t1, t2, t3 = st.tabs(["Upload Images", "Assignments", "Export Dataset"])
-            
             with t1:
                 up = st.file_uploader("Upload Raw Images", accept_multiple_files=True, type=['jpg','jpeg','png'])
                 if up and st.button("Save Images"):
@@ -114,23 +119,20 @@ def admin_page():
                         p['images'].append({'id': id, 'date': datetime.now().strftime("%Y-%m-%d")})
                     save_json(PROJECTS_FILE, projs)
                     st.success("Uploaded.")
-
             with t2:
                 users_list = list(load_json(USERS_FILE).keys())
-                target_u = st.selectbox("Add User Access", users_list)
+                target_u = st.selectbox("Assign to User", users_list)
                 if st.button("Grant Access"):
                     if target_u not in p['access_users']: p['access_users'].append(target_u)
                     save_json(PROJECTS_FILE, projs)
-                
                 if p['access_users']:
-                    u_to_assign = st.selectbox("Assign Images to", p['access_users'], key="assign_u")
+                    u_to_assign = st.selectbox("Images for", p['access_users'])
                     avail = [i['id'] for i in p['images'] if i['id'] not in p['assignments'].get(u_to_assign, [])]
                     sel_imgs = st.multiselect("Select Images", avail)
                     if st.button("Confirm Assignment"):
                         p['assignments'].setdefault(u_to_assign, []).extend(sel_imgs)
                         save_json(PROJECTS_FILE, projs)
                         st.rerun()
-            
             with t3:
                 if st.button("📦 Download Training Dataset"):
                     download_yolo(sel_p, p)
@@ -147,9 +149,7 @@ def admin_page():
                 save_json(USERS_FILE, u_acc)
                 st.success("User added.")
 
-# --- USER PANEL ---
 def user_page():
-    st.sidebar.title(f"User: {st.session_state.username}")
     st.sidebar.button("Logout", on_click=logout)
     projs = load_json(PROJECTS_FILE)
     my_projs = [n for n, p in projs.items() if st.session_state.username in p['access_users']]
@@ -164,28 +164,32 @@ def user_page():
     pending = [i for i in my_imgs if p.get('statuses', {}).get(i, {}).get(st.session_state.username) != "Completed"]
     
     if not pending:
-        st.success("All tasks complete!")
+        st.success("Tasks complete!")
         return
 
     img_id = pending[0]
     img_path = os.path.join(IMAGES_DIR, f"{img_id}.png")
     
     if os.path.exists(img_path):
-        img = Image.open(img_path)
-        bg_url = get_image_base64(img) # Fix for AttributeError
+        raw_img = Image.open(img_path)
+        
+        # PREPARE IMAGE MANUALLY TO BYPASS CANVAS ERRORS
+        bg_url, canvas_w, canvas_h = prepare_canvas_image(raw_img, 600)
         
         col_ui, col_canvas = st.columns([1, 4])
         with col_ui:
             sel_cls = st.selectbox("Class", p['product_list'], key=f"cls_{img_id}")
-            if st.button("🚀 Submit Annotation", use_container_width=True):
+            if st.button("🚀 Submit", use_container_width=True):
                 st.session_state[f"save_{img_id}"] = True
 
         with col_canvas:
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 background_image=bg_url,
-                height=img.height, width=img.width,
-                drawing_mode="rect", key=f"canvas_{img_id}"
+                height=canvas_h,
+                width=canvas_w,
+                drawing_mode="rect",
+                key=f"canvas_{img_id}"
             )
 
         if st.session_state.get(f"save_{img_id}"):
@@ -194,12 +198,16 @@ def user_page():
                 yolo_anns = []
                 for o in objs:
                     if o["type"] == "rect":
-                        w_n, h_n = o["width"] / img.width, o["height"] / img.height
-                        yolo_anns.append({'class': sel_cls, 'bbox': [(o["left"]/img.width)+(w_n/2), (o["top"]/img.height)+(h_n/2), w_n, h_n]})
+                        # Normalize coordinates based on the CANVAS size
+                        w_n, h_n = o["width"] / canvas_w, o["height"] / canvas_h
+                        x_c = (o["left"] / canvas_w) + (w_n / 2)
+                        y_c = (o["top"] / canvas_h) + (h_n / 2)
+                        yolo_anns.append({'class': sel_cls, 'bbox': [x_c, y_c, w_n, h_n]})
                 
                 p['annotations'].setdefault(img_id, {})[st.session_state.username] = yolo_anns
                 p.setdefault('statuses', {}).setdefault(img_id, {})[st.session_state.username] = "Completed"
                 save_json(PROJECTS_FILE, projs)
+                st.session_state[f"save_{img_id}"] = False
                 st.rerun()
 
 def review_ui(projs):
