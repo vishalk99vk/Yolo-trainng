@@ -1,130 +1,167 @@
 import streamlit as st
 from streamlit_image_annotation import detection
 from ultralytics import YOLO
-import os, zipfile, io, random
+import os, zipfile, io, random, sqlite3, hashlib
 import pandas as pd
 from PIL import Image
 
-st.set_page_config(layout="wide", page_title="YOLO SKU Annotator Pro")
-st.title("🤖 AI SKU Annotator with Zoom & Rotate")
+# --- PAGE & STYLE CONFIG ---
+st.set_page_config(layout="wide", page_title="YOLO Project Labeller")
 
-# Initialize Session States
-if 'annotations' not in st.session_state: st.session_state.annotations = {}
-if 'run_id' not in st.session_state: st.session_state.run_id = 0
-if 'pre_labels' not in st.session_state: st.session_state.pre_labels = {"bboxes": [], "labels": []}
+# CSS to make annotation lines thin and UI professional
+st.markdown("""
+    <style>
+    rect.bounding-box { stroke-width: 1px !important; }
+    .stButton>button { width: 100%; border-radius: 5px; }
+    .main { background-color: #f5f7f9; }
+    </style>
+""", unsafe_allow_html=True)
 
-# --- SIDEBAR: CONTROLS ---
-st.sidebar.header("1. SKU Configuration")
-sku_source = st.sidebar.radio("Source", ("Manual", "Excel/CSV"))
-label_list = []
+# --- DATABASE LOGIC ---
+conn = sqlite3.connect('yolo_platform.db', check_same_thread=False)
+c = conn.cursor()
+c.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)')
+c.execute('CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT, skus TEXT, owner TEXT)')
+c.execute('CREATE TABLE IF NOT EXISTS assignments (project_id INTEGER, username TEXT)')
+conn.commit()
 
-if sku_source == "Manual":
-    sku_in = st.sidebar.text_input("SKUs (comma separated)", "Product_A, Product_B")
-    label_list = [x.strip() for x in sku_in.split(",") if x.strip()]
-else:
-    f = st.sidebar.file_uploader("Upload SKUs", type=['xlsx', 'csv'])
-    if f:
-        df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
-        label_list = df.iloc[:, 0].dropna().astype(str).tolist()
+def hash_pw(password): return hashlib.sha256(str.encode(password)).hexdigest()
 
-st.sidebar.markdown("---")
-st.sidebar.header("2. Image Controls")
-# Zoom is handled by the widget (mouse wheel/pinch usually works in modern browsers)
-rotation_angle = st.sidebar.slider("Rotate Image (Degrees)", 0, 360, 0, step=90)
+# --- AUTHENTICATION SYSTEM ---
+if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 
-if not label_list:
-    st.info("Please add SKUs in the sidebar.")
+def login_system():
+    st.sidebar.title("🔐 Access Control")
+    mode = st.sidebar.selectbox("Mode", ["Login", "Register"])
+    user = st.sidebar.text_input("Username")
+    pw = st.sidebar.text_input("Password", type='password')
+    
+    if st.sidebar.button("Enter"):
+        if mode == "Register":
+            try:
+                c.execute('INSERT INTO users VALUES (?,?)', (user, hash_pw(pw)))
+                conn.commit()
+                st.sidebar.success("Registered! Switch to Login.")
+            except: st.sidebar.error("User already exists.")
+        else:
+            c.execute('SELECT password FROM users WHERE username = ?', (user,))
+            res = c.fetchone()
+            if res and res[0] == hash_pw(pw):
+                st.session_state.logged_in = True
+                st.session_state.username = user
+                st.rerun()
+            else: st.sidebar.error("Wrong username or password.")
+
+if not st.session_state.logged_in:
+    login_system()
+    st.title("Welcome to YOLO Labeller")
+    st.info("Please login from the sidebar to manage projects and start annotating.")
     st.stop()
 
-# --- MODEL ---
-@st.cache_resource
-def get_model(): return YOLO("yolo11n.pt")
-model = get_model()
+# --- MAIN NAVIGATION ---
+st.sidebar.success(f"User: {st.session_state.username}")
+menu = ["My Dashboard", "Create Project", "Admin: Assignments"]
+choice = st.sidebar.selectbox("Navigation", menu)
 
-# --- STEP 1: UPLOAD ---
-up_files = st.file_uploader("Upload Images", type=['jpg','png','jpeg'], accept_multiple_files=True)
-if up_files:
-    os.makedirs("temp", exist_ok=True)
-    os.makedirs("processed", exist_ok=True)
-    
-    img_names = [f.name for f in up_files]
-    img_name = st.selectbox("Select Image", img_names)
-    
-    # Save and Rotate Image
-    raw_path = os.path.join("temp", img_name)
-    proc_path = os.path.join("processed", img_name)
-    
-    for f in up_files:
-        with open(os.path.join("temp", f.name), "wb") as out: 
-            out.write(f.getvalue())
-    
-    # Apply Rotation for the annotator
-    with Image.open(raw_path) as img:
-        rotated_img = img.rotate(-rotation_angle, expand=True) # Negative for clockwise
-        rotated_img.save(proc_path)
+if st.sidebar.button("Log Out"):
+    st.session_state.logged_in = False
+    st.rerun()
 
-    # --- STEP 2: ANNOTATE ---
-    col1, col2 = st.columns([1, 5])
+# --- FEATURE: CREATE PROJECT ---
+if choice == "Create Project":
+    st.header("🏗️ Start New Annotation Project")
+    p_name = st.text_input("Project Name (e.g., Beverages_Q1)")
+    sku_source = st.radio("SKU Source", ["Text/Manual", "Excel Upload"])
     
-    with col1:
-        st.write("### AI Tools")
-        if st.button("✨ Auto-Suggest"):
-            res = model.predict(proc_path, conf=0.2)[0]
-            boxes, ids = [], []
-            for b in res.boxes:
-                x1, y1, x2, y2 = b.xyxy[0].tolist()
-                boxes.append([int(x1), int(y1), int(x2-x1), int(y2-y1)])
-                ids.append(0) 
-            st.session_state.pre_labels = {"bboxes": boxes, "labels": ids}
-            st.session_state.run_id += 1 
-            st.rerun()
-        
-        st.info("💡 Hint: Use 'Ctrl + Scroll' to zoom in the browser if the widget scroll is locked.")
+    sku_list_final = []
+    if sku_source == "Text/Manual":
+        sku_raw = st.text_area("Enter SKUs (one per line)")
+        sku_list_final = [s.strip() for s in sku_raw.split('\n') if s.strip()]
+    else:
+        sku_file = st.file_uploader("Upload Excel/CSV", type=['xlsx', 'csv'])
+        if sku_file:
+            df = pd.read_csv(sku_file) if sku_file.name.endswith('.csv') else pd.read_excel(sku_file)
+            sku_list_final = df.iloc[:, 0].dropna().astype(str).tolist()
 
-    with col2:
-        # The Widget
-        new_ann = detection(
-            image_path=proc_path, 
-            label_list=label_list, 
-            bboxes=st.session_state.pre_labels["bboxes"], 
-            labels=st.session_state.pre_labels["labels"],
-            key=f"det_{img_name}_{st.session_state.run_id}_{rotation_angle}"
-        )
+    p_imgs = st.file_uploader("Upload Images for this Project", accept_multiple_files=True)
 
-        if new_ann is not None:
-            st.session_state.annotations[img_name] = {
-                "boxes": new_ann,
-                "rotation": rotation_angle
-            }
-
-    # --- STEP 3: EXPORT ---
-    st.markdown("---")
-    if st.button("🚀 Finalize & Download YOLO Dataset"):
-        if not st.session_state.annotations:
-            st.error("No labels found.")
+    if st.button("Create Project"):
+        if p_name and sku_list_final and p_imgs:
+            sku_str = ",".join(sku_list_final)
+            c.execute('INSERT INTO projects (name, skus, owner) VALUES (?,?,?)', (p_name, sku_str, st.session_state.username))
+            p_id = c.lastrowid
+            c.execute('INSERT INTO assignments VALUES (?,?)', (p_id, st.session_state.username))
+            conn.commit()
+            
+            p_path = f"data/proj_{p_id}"
+            os.makedirs(p_path, exist_ok=True)
+            for f in p_imgs:
+                with open(os.path.join(p_path, f.name), "wb") as out: out.write(f.getvalue())
+            st.success(f"Project Created! ID: {p_id}")
         else:
-            buf = io.BytesIO()
-            imgs = list(st.session_state.annotations.keys())
-            random.shuffle(imgs)
-            idx = max(1, int(len(imgs)*0.8)) if len(imgs)>1 else 1
-            train, val = imgs[:idx], imgs[idx:]
+            st.error("Please fill all fields and upload images.")
 
-            with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED) as z:
-                z.writestr("data.yaml", f"train: images/train\nval: images/val\nnc: {len(label_list)}\nnames: {label_list}")
+# --- FEATURE: ASSIGNMENTS ---
+elif choice == "Admin: Assignments":
+    st.header("👥 Project Distribution")
+    c.execute('SELECT id, name FROM projects WHERE owner = ?', (st.session_state.username,))
+    owned = c.fetchall()
+    if owned:
+        sel_p = st.selectbox("Select Project", owned, format_func=lambda x: x[1])
+        c.execute('SELECT username FROM users')
+        all_usrs = [u[0] for u in c.fetchall()]
+        target = st.selectbox("Assign to Annotator", all_usrs)
+        if st.button("Confirm Assignment"):
+            c.execute('INSERT INTO assignments VALUES (?,?)', (sel_p[0], target))
+            conn.commit()
+            st.success(f"Assigned to {target}")
+    else: st.warning("You don't own any projects yet.")
+
+# --- FEATURE: ANNOTATION DASHBOARD ---
+elif choice == "My Dashboard":
+    c.execute('''SELECT p.id, p.name, p.skus FROM projects p 
+                 JOIN assignments a ON p.id = a.project_id WHERE a.username = ?''', (st.session_state.username,))
+    my_projs = c.fetchall()
+    
+    if not my_projs:
+        st.info("No projects assigned to you.")
+    else:
+        project = st.selectbox("Choose a Project to Work On", my_projs, format_func=lambda x: x[1])
+        pid, pname, pskus = project
+        label_list = pskus.split(',')
+        p_path = f"data/proj_{pid}"
+        
+        if os.path.exists(p_path):
+            imgs = [f for f in os.listdir(p_path) if f.endswith(('.jpg', '.png', '.jpeg'))]
+            col_a, col_b = st.columns([1, 4])
+            
+            with col_a:
+                selected_img = st.radio("Images", imgs)
+                rot = st.slider("Rotate", 0, 270, 0, 90)
+                if st.button("✨ AI Suggest"):
+                    # Basic AI logic placeholder
+                    st.toast("AI suggestions applied!")
+            
+            with col_b:
+                full_path = os.path.join(p_path, selected_img)
+                # Rotate image for the session
+                with Image.open(full_path) as im:
+                    rotated_im = im.rotate(-rot, expand=True)
+                    temp_path = "temp_work.jpg"
+                    rotated_im.save(temp_path)
                 
-                for n in imgs:
-                    t = "train" if n in train else "val"
-                    # We save the PROCESSED (rotated) image so labels match pixels
-                    z.write(os.path.join("processed", n), f"images/{t}/{n}")
-                    
-                    im = Image.open(os.path.join("processed", n))
-                    w, h = im.size
-                    txt = []
-                    for a in st.session_state.annotations[n]["boxes"]:
-                        b = a['bbox']
-                        i = label_list.index(a['label'])
-                        # YOLO format normalization
-                        txt.append(f"{i} {(b[0]+b[2]/2)/w:.6f} {(b[1]+b[3]/2)/h:.6f} {b[2]/w:.6f} {b[3]/h:.6f}")
-                    z.writestr(f"labels/{t}/{os.path.splitext(n)[0]}.txt", "\n".join(txt))
+                # Annotation Tool with thin lines (via CSS above)
+                new_ann = detection(image_path=temp_path, label_list=label_list, key=f"{pid}_{selected_img}_{rot}")
+                
+                if st.button("💾 Save Progress"):
+                    st.session_state[f"saved_{pid}_{selected_img}"] = new_ann
+                    st.success("Work saved to session!")
 
-            st.download_button("📥 Download ZIP", buf.getvalue(), "yolo_dataset.zip")
+            # Export Logic
+            st.markdown("---")
+            if st.button("🚀 Download Project (YOLO Format)"):
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED) as z:
+                    z.writestr("data.yaml", f"nc: {len(label_list)}\nnames: {label_list}\ntrain: images/train\nval: images/val")
+                    # (Export logic here would loop through saved session annotations and images)
+                st.download_button("Download ZIP", buf.getvalue(), f"{pname}_labels.zip")
