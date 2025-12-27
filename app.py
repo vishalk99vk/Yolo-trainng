@@ -7,7 +7,7 @@ from io import BytesIO
 import pandas as pd
 from PIL import Image
 
-# 1. --- CONFIGURATION ---
+# --- CONFIGURATION ---
 DATA_DIR = "data"
 PROJECTS_FILE = os.path.join(DATA_DIR, "projects.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -16,7 +16,6 @@ IMAGES_DIR = os.path.join(DATA_DIR, "images")
 for d in [DATA_DIR, IMAGES_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# 2. --- HELPERS ---
 def load_json(f):
     if os.path.exists(f):
         try:
@@ -31,9 +30,9 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-# 3. --- MAIN APP ---
+# --- MAIN APP ---
 def main():
-    st.set_page_config(page_title="YOLO Annotator Final", layout="wide")
+    st.set_page_config(page_title="YOLO Annotator Pro", layout="wide")
     
     try:
         from streamlit_drawable_canvas import st_canvas
@@ -52,9 +51,9 @@ def main():
             user_ui()
 
 def login_ui():
-    st.header("🎯 YOLO Object Labeling System")
+    st.header("🎯 YOLO Annotation System")
     with st.form("login_box"):
-        u_type = st.selectbox("Account", ["user", "admin"])
+        u_type = st.selectbox("Account Type", ["user", "admin"])
         u_name = st.text_input("Username")
         u_pass = st.text_input("Password", type="password")
         if st.form_submit_button("Sign In"):
@@ -67,7 +66,7 @@ def login_ui():
                 st.rerun()
             else: st.error("Access Denied")
 
-# 4. --- ADMIN INTERFACE ---
+# --- ADMIN PANEL ---
 def admin_ui():
     st.sidebar.title("Administrator")
     st.sidebar.button("Logout", on_click=logout)
@@ -77,29 +76,19 @@ def admin_ui():
     users_data = load_json(USERS_FILE)
 
     if menu == "Manage Projects":
-        with st.expander("➕ Create New Project"):
-            p_name = st.text_input("Project Name")
-            p_file = st.file_uploader("Product List (Excel/CSV)", type=['xlsx', 'csv'])
-            if st.button("Create") and p_name and p_file:
-                df = pd.read_csv(p_file) if p_file.name.endswith('.csv') else pd.read_excel(p_file)
-                p_list = [str(x).strip() for x in df.iloc[:, 0].dropna().tolist()]
-                projs[p_name] = {'product_list': p_list, 'images': [], 'access_users': [], 'assignments': {}, 'annotations': {}, 'statuses': {}}
-                save_json(PROJECTS_FILE, projs)
-                st.success(f"Project '{p_name}' created.")
-
-        with st.expander("👤 Register Workers"):
-            un = st.text_input("Worker Username")
-            pw = st.text_input("Worker Password")
-            if st.button("Add Worker") and un and pw:
-                users_data[un] = {"password": pw}
-                save_json(USERS_FILE, users_data)
-                st.success("Worker added!")
+        p_name = st.text_input("Project Name")
+        p_file = st.file_uploader("Product List (Excel/CSV)", type=['xlsx', 'csv'])
+        if st.button("Create Project") and p_name and p_file:
+            df = pd.read_csv(p_file) if p_file.name.endswith('.csv') else pd.read_excel(p_file)
+            p_list = [str(x).strip() for x in df.iloc[:, 0].dropna().tolist()]
+            projs[p_name] = {'product_list': p_list, 'images': [], 'access_users': [], 'assignments': {}, 'annotations': {}, 'statuses': {}}
+            save_json(PROJECTS_FILE, projs)
+            st.success("Project created.")
 
     elif menu == "Assign Tasks":
-        if not projs: st.info("Create a project first."); return
+        if not projs: return
         sel_p = st.selectbox("Choose Project", list(projs.keys()))
         p = projs[sel_p]
-        
         up = st.file_uploader("Upload Images", accept_multiple_files=True)
         if up and st.button("Bulk Upload"):
             for f in up:
@@ -107,29 +96,26 @@ def admin_ui():
                 Image.open(f).save(os.path.join(IMAGES_DIR, f"{id}.png"))
                 p['images'].append({'id': id})
             save_json(PROJECTS_FILE, projs)
-            st.success("Images uploaded!")
+            st.success("Uploaded!")
         
         st.divider()
         all_assigned = []
         for u in p['assignments']: all_assigned.extend(p['assignments'][u])
         avail = [im['id'] for im in p['images'] if im['id'] not in all_assigned]
-        
-        st.write(f"📥 **Unassigned Images:** {len(avail)}")
         if avail:
             target = st.selectbox("Worker", list(users_data.keys()))
-            num = st.number_input("Amount", 1, len(avail), min(10, len(avail)))
+            num = st.number_input("Count", 1, len(avail), min(10, len(avail)))
             if st.button("Confirm Bulk Assignment"):
                 if target not in p['access_users']: p['access_users'].append(target)
                 p['assignments'].setdefault(target, []).extend(avail[:num])
-                save_json(PROJECTS_FILE, projs)
-                st.rerun()
+                save_json(PROJECTS_FILE, projs); st.rerun()
 
     elif menu == "Review & Export":
         sel_p = st.selectbox("Select Project", list(projs.keys()))
-        if st.button("📦 Export YOLO Dataset"):
+        if st.button("📦 Export YOLO ZIP"):
             download_yolo(sel_p, projs[sel_p])
 
-# 5. --- USER INTERFACE (WITH VISIBILITY FIX) ---
+# --- USER INTERFACE (WITH RESET & VISIBILITY FIX) ---
 def user_ui():
     from streamlit_drawable_canvas import st_canvas
     st.sidebar.button("Logout", on_click=logout)
@@ -137,7 +123,7 @@ def user_ui():
     projs = load_json(PROJECTS_FILE)
     my_projs = [n for n, p in projs.items() if st.session_state.username in p['access_users']]
     
-    if not my_projs: st.info("No projects assigned."); return
+    if not my_projs: st.info("No work assigned."); return
     p_name = st.selectbox("Current Project", my_projs)
     p = projs[p_name]
     my_imgs = p['assignments'].get(st.session_state.username, [])
@@ -151,45 +137,55 @@ def user_ui():
     if os.path.exists(img_path):
         img_obj = Image.open(img_path).convert("RGB")
         
-        # UI: ZOOM CONTROLS
+        # 1. Coordinate Scaling
         zoom = st.sidebar.slider("Image Zoom", 0.5, 3.0, 1.0, 0.1)
-        base_height = 600
-        canvas_h = int(base_height * zoom)
+        base_h = 600
+        canvas_h = int(base_h * zoom)
         canvas_w = int(canvas_h * (img_obj.width / img_obj.height))
         
-        # Stability Cap for extra-wide images
+        # Stability Cap for Wide Images
         if canvas_w > 1100:
             canvas_w = 1100
             canvas_h = int(canvas_w * (img_obj.height / img_obj.width))
 
-        # IMPORTANT: Resize to EXACT canvas pixel size
         resized_img = img_obj.resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
         
         col_ui, col_canvas = st.columns([1, 4])
         with col_ui:
-            st.subheader("Manual Tag")
-            sel_cls = st.selectbox("Class Name", p['product_list'], key=f"cls_{img_id}")
+            st.subheader("Controls")
+            sel_cls = st.selectbox("Product", p['product_list'], key=f"cls_{img_id}")
+            
             if st.button("💾 Save & Next", use_container_width=True):
                 st.session_state[f"sub_{img_id}"] = True
+            
             if st.button("⏭️ Skip", use_container_width=True):
                 p.setdefault('statuses', {}).setdefault(img_id, {})[st.session_state.username] = "Skipped"
                 save_json(PROJECTS_FILE, projs); st.rerun()
+            
+            st.divider()
+            # RESET BUTTON: Increments a counter to force a new canvas key
+            if st.button("🔄 Reload Image", help="Use this if the image is blank"):
+                ver = st.session_state.get('canvas_ver', 0)
+                st.session_state['canvas_ver'] = ver + 1
+                st.rerun()
 
         with col_canvas:
-            # UNIQUE KEY: changes with zoom to force canvas refresh
-            canvas_key = f"can_{img_id}_{int(zoom*100)}"
+            # Key forces refresh on zoom OR manual reset
+            ver = st.session_state.get('canvas_ver', 0)
+            canvas_key = f"can_{img_id}_{int(zoom*100)}_{ver}"
             
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_width=2,
                 stroke_color="#FF0000",
-                background_image=resized_img, # PIL object
-                background_color="",          # Empty for visibility
+                background_image=resized_img,
+                background_color="#FFFFFF00", # Explicit Transparency
                 height=canvas_h, 
                 width=canvas_w,
                 drawing_mode="rect",
                 display_toolbar=True,
-                key=canvas_key
+                key=canvas_key,
+                update_freq=1000
             )
 
         if st.session_state.get(f"sub_{img_id}"):
@@ -207,10 +203,10 @@ def user_ui():
                 st.session_state[f"sub_{img_id}"] = False
                 st.rerun()
             else:
-                st.warning("Please draw at least one bounding box.")
+                st.warning("Draw a box first!")
                 st.session_state[f"sub_{img_id}"] = False
 
-# 6. --- EXPORT ---
+# --- EXPORT TO YOLO ---
 def download_yolo(name, p):
     buf = BytesIO()
     with zipfile.ZipFile(buf, 'w') as z:
@@ -227,7 +223,7 @@ def download_yolo(name, p):
                             lbl += f"{idx} {' '.join([f'{v:.6f}' for v in a['bbox']])}\n"
                 if lbl: z.writestr(f"labels/{iid}.txt", lbl)
         z.writestr("data.yaml", f"names: {p['product_list']}\nnc: {len(p['product_list'])}\ntrain: images\nval: images")
-    st.download_button("📥 Click to Download", buf.getvalue(), f"{name}_yolo.zip")
+    st.download_button("📦 Download Dataset", buf.getvalue(), f"{name}_yolo.zip")
 
 if __name__ == "__main__":
     main()
