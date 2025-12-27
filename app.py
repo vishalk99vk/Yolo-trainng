@@ -100,8 +100,24 @@ def admin_page():
 def create_project():
     st.subheader("Create Project")
     project_name = st.text_input("Project Name")
-    product_list = st.text_area("Product List (comma separated)").split(',')
-    product_list = [p.strip() for p in product_list if p.strip()]
+    
+    # Option to upload Excel or enter manually
+    upload_option = st.radio("How to add products?", ["Manual Entry", "Upload Excel"])
+    product_list = []
+    
+    if upload_option == "Manual Entry":
+        products_text = st.text_area("Product List (comma separated)")
+        if products_text:
+            product_list = [p.strip() for p in products_text.split(',') if p.strip()]
+    elif upload_option == "Upload Excel":
+        uploaded_file = st.file_uploader("Upload Excel file", type=['xlsx', 'xls'])
+        if uploaded_file:
+            df = pd.read_excel(uploaded_file)
+            # Assume the first column has product names
+            if not df.empty:
+                product_list = df.iloc[:, 0].dropna().tolist()
+                product_list = [str(p).strip() for p in product_list if str(p).strip()]
+                st.write("Products from Excel:", product_list)
     
     if st.button("Create"):
         projects = load_projects()
