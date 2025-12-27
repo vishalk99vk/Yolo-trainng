@@ -7,6 +7,7 @@ from io import BytesIO
 import pandas as pd
 from PIL import Image
 import base64
+from datetime import datetime
 
 # Try to import drawable canvas, fallback if not available
 try:
@@ -135,102 +136,108 @@ def user_page():
         st.write("No assigned images")
         return
     
-    if st.session_state.current_project != selected_project:
-        st.session_state.current_project = selected_project
-        st.session_state.current_image_index = 0
+    # Group images by date
+    images_by_date = {}
+    for img_dict in project['images']:
+        img_id = img_dict['id']
+        date = img_dict['date']
+        if img_id in assigned_images:
+            if date not in images_by_date:
+                images_by_date[date] = []
+            images_by_date[date].append(img_id)
     
-    current_img_id = assigned_images[st.session_state.current_image_index]
-    img_path = os.path.join(IMAGES_DIR, f"{current_img_id}.png")
-    if os.path.exists(img_path):
-        img = Image.open(img_path)
-        st.image(img, caption=f"Image {st.session_state.current_image_index + 1}/{len(assigned_images)}")
-        
-        # Annotation with drawing or sliders
-        if CANVAS_AVAILABLE:
-            st.subheader("Draw Annotations")
-            class_name = st.selectbox("Select Class", project['product_list'])
-            
-            # Canvas for drawing
-            canvas_result = st_canvas(
-                fill_color="rgba(255, 165, 0, 0.3)",  # Fixed fill color with some opacity
-                stroke_width=2,
-                stroke_color="#000000",
-                background_color="#eee",
-                background_image=img,
-                update_streamlit=True,
-                height=img.height,
-                width=img.width,
-                drawing_mode="rect",
-                key=f"canvas_{current_img_id}",
-            )
-            
-            if canvas_result.json_data is not None:
-                objects = canvas_result.json_data["objects"]
-                if objects:
-                    st.write("Detected rectangles:")
-                    for obj in objects:
-                        if obj["type"] == "rect":
-                            left = obj["left"] / img.width
-                            top = obj["top"] / img.height
-                            width = obj["width"] / img.width
-                            height = obj["height"] / img.height
-                            x_center = left + width / 2
-                            y_center = top + height / 2
-                            st.write(f"Class: {class_name}, BBox: ({x_center:.3f}, {y_center:.3f}, {width:.3f}, {height:.3f})")
-            
-            if st.button("Save Annotations"):
-                if canvas_result.json_data is not None:
-                    objects = canvas_result.json_data["objects"]
-                    annotations = []
-                    for obj in objects:
-                        if obj["type"] == "rect":
-                            left = obj["left"] / img.width
-                            top = obj["top"] / img.height
-                            width = obj["width"] / img.width
-                            height = obj["height"] / img.height
-                            x_center = left + width / 2
-                            y_center = top + height / 2
-                            annotations.append({
-                                'class': class_name,
-                                'bbox': [x_center, y_center, width, height]
-                            })
-                    if current_img_id not in project['annotations']:
-                        project['annotations'][current_img_id] = {}
-                    project['annotations'][current_img_id][st.session_state.username] = annotations
-                    save_projects(projects)
-                    st.success("Annotations saved")
-        else:
-            st.warning("Drawing canvas not available. Install 'streamlit-drawable-canvas' for drawing. Using sliders instead.")
-            # Simple annotation input (for demo; in real app, use a proper annotation tool)
-            class_name = st.selectbox("Class", project['product_list'])
-            x = st.slider("X center", 0.0, 1.0, 0.5)
-            y = st.slider("Y center", 0.0, 1.0, 0.5)
-            w = st.slider("Width", 0.0, 1.0, 0.1)
-            h = st.slider("Height", 0.0, 1.0, 0.1)
-            
-            if st.button("Add Annotation"):
-                if current_img_id not in project['annotations']:
-                    project['annotations'][current_img_id] = {}
-                if st.session_state.username not in project['annotations'][current_img_id]:
-                    project['annotations'][current_img_id][st.session_state.username] = []
-                project['annotations'][current_img_id][st.session_state.username].append({
-                    'class': class_name,
-                    'bbox': [x, y, w, h]
-                })
-                save_projects(projects)
-                st.success("Annotation added")
-        
-        if st.button("Complete Image"):
-            # Mark as completed (already handled by presence in annotations)
-            if st.session_state.current_image_index < len(assigned_images) - 1:
-                st.session_state.current_image_index += 1
-                st.rerun()
-            else:
-                st.success("All images completed")
-        
-        if st.session_state.current_image_index == len(assigned_images) - 1 and st.button("Send to Admin"):
-            # Already completed
-            st.success("Sent to admin")
+    if not images_by_date:
+        st.write("No images to annotate")
+        return
+    
+    # Display images grouped by date
+    for date in sorted(images_by_date.keys(), reverse=True):  # Most recent first
+        st.subheader(f"Images uploaded on {date}")
+        date_images = images_by_date[date]
+        for img_id in date_images:
+            img_path = os.path.join(IMAGES_DIR, f"{img_id}.png")
+            if os.path.exists(img_path):
+                img = Image.open(img_path)
+                st.image(img, caption=f"Image ID: {img_id}")
+                
+                # Annotation with drawing or sliders
+                if CANVAS_AVAILABLE:
+                    class_name = st.selectbox(f"Select Class for {img_id}", project['product_list'], key=f"class_{img_id}")
+                    
+                    # Canvas for drawing
+                    canvas_result = st_canvas(
+                        fill_color="rgba(255, 165, 0, 0.3)",  # Fixed fill color with some opacity
+                        stroke_width=2,
+                        stroke_color="#000000",
+                        background_color="#eee",
+                        background_image=img,
+                        update_streamlit=True,
+                        height=img.height,
+                        width=img.width,
+                        drawing_mode="rect",
+                        key=f"canvas_{img_id}",
+                    )
+                    
+                    if canvas_result.json_data is not None:
+                        objects = canvas_result.json_data["objects"]
+                        if objects:
+                            st.write("Detected rectangles:")
+                            for obj in objects:
+                                if obj["type"] == "rect":
+                                    left = obj["left"] / img.width
+                                    top = obj["top"] / img.height
+                                    width = obj["width"] / img.width
+                                    height = obj["height"] / img.height
+                                    x_center = left + width / 2
+                                    y_center = top + height / 2
+                                    st.write(f"Class: {class_name}, BBox: ({x_center:.3f}, {y_center:.3f}, {width:.3f}, {height:.3f})")
+                    
+                    if st.button(f"Save Annotations for {img_id}", key=f"save_{img_id}"):
+                        if canvas_result.json_data is not None:
+                            objects = canvas_result.json_data["objects"]
+                            annotations = []
+                            for obj in objects:
+                                if obj["type"] == "rect":
+                                    left = obj["left"] / img.width
+                                    top = obj["top"] / img.height
+                                    width = obj["width"] / img.width
+                                    height = obj["height"] / img.height
+                                    x_center = left + width / 2
+                                    y_center = top + height / 2
+                                    annotations.append({
+                                        'class': class_name,
+                                        'bbox': [x_center, y_center, width, height]
+                                    })
+                            if img_id not in project['annotations']:
+                                project['annotations'][img_id] = {}
+                            project['annotations'][img_id][st.session_state.username] = annotations
+                            save_projects(projects)
+                            st.success(f"Annotations saved for {img_id}")
+                else:
+                    st.warning("Drawing canvas not available. Install 'streamlit-drawable-canvas' for drawing. Using sliders instead.")
+                    # Simple annotation input (for demo; in real app, use a proper annotation tool)
+                    class_name = st.selectbox(f"Class for {img_id}", project['product_list'], key=f"class_{img_id}")
+                    x = st.slider(f"X center for {img_id}", 0.0, 1.0, 0.5, key=f"x_{img_id}")
+                    y = st.slider(f"Y center for {img_id}", 0.0, 1.0, 0.5, key=f"y_{img_id}")
+                    w = st.slider(f"Width for {img_id}", 0.0, 1.0, 0.1, key=f"w_{img_id}")
+                    h = st.slider(f"Height for {img_id}", 0.0, 1.0, 0.1, key=f"h_{img_id}")
+                    
+                    if st.button(f"Add Annotation for {img_id}", key=f"add_{img_id}"):
+                        if img_id not in project['annotations']:
+                            project['annotations'][img_id] = {}
+                        if st.session_state.username not in project['annotations'][img_id]:
+                            project['annotations'][img_id][st.session_state.username] = []
+                        project['annotations'][img_id][st.session_state.username].append({
+                            'class': class_name,
+                            'bbox': [x, y, w, h]
+                        })
+                        save_projects(projects)
+                        st.success(f"Annotation added for {img_id}")
+    
+    # Check if all assigned images are completed
+    all_completed = all(img_id in project['annotations'] and st.session_state.username in project['annotations'][img_id] for img_id in assigned_images)
+    if all_completed and st.button("Send to Admin"):
+        st.success("Sent to admin")
 
 def logout():
     st.session_state.logged_in = False
@@ -270,7 +277,7 @@ def create_project():
         if project_name not in projects:
             projects[project_name] = {
                 'product_list': product_list,
-                'images': [],
+                'images': [],  # Now list of {'id': image_id, 'date': date_str}
                 'access_users': [],
                 'assignments': {},  # user: [image_ids]
                 'annotations': {}  # image_id: {user: annotations}
@@ -309,12 +316,13 @@ def manage_projects():
     # Add images
     uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
     if uploaded_files:
+        date_str = datetime.now().strftime("%Y-%m-%d")
         for file in uploaded_files:
             image_id = str(uuid.uuid4())
             image_path = os.path.join(IMAGES_DIR, f"{image_id}.png")
             with open(image_path, 'wb') as f:
                 f.write(file.getvalue())
-            project['images'].append(image_id)
+            project['images'].append({'id': image_id, 'date': date_str})
         save_projects(projects)
         st.success("Images uploaded")
     
@@ -340,7 +348,7 @@ def manage_projects():
     users = project['access_users']
     if users:
         user = st.selectbox("Select User", users)
-        available_images = [img for img in project['images'] if img not in project['assignments'].get(user, [])]
+        available_images = [img['id'] for img in project['images'] if img['id'] not in project['assignments'].get(user, [])]
         selected_images = st.multiselect("Select Images", available_images)
         if st.button("Assign"):
             if user not in project['assignments']:
@@ -357,8 +365,8 @@ def manage_projects():
     for user in users:
         assigned = len(project['assignments'].get(user, []))
         completed = 0
-        for img in project['assignments'].get(user, []):
-            if img in project['annotations'] and user in project['annotations'][img]:
+        for img_id in project['assignments'].get(user, []):
+            if img_id in project['annotations'] and user in project['annotations'][img_id]:
                 completed += 1
         st.write(f"{user}: {completed}/{assigned} completed")
     
@@ -380,12 +388,14 @@ def download_yolo(project_name, project):
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
         # Images
-        for img_id in project['images']:
+        for img_dict in project['images']:
+            img_id = img_dict['id']
             img_path = os.path.join(IMAGES_DIR, f"{img_id}.png")
             zip_file.write(img_path, f"images/{img_id}.png")
         
         # Annotations
-        for img_id in project['images']:
+        for img_dict in project['images']:
+            img_id = img_dict['id']
             if img_id in project['annotations']:
                 for user, anns in project['annotations'][img_id].items():
                     txt_content = ""
