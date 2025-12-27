@@ -7,6 +7,7 @@ from io import BytesIO
 import pandas as pd
 from PIL import Image
 import base64
+from streamlit_drawable_canvas import st_canvas
 
 # Constants
 DATA_DIR = "data"
@@ -138,24 +139,59 @@ def user_page():
         img = Image.open(img_path)
         st.image(img, caption=f"Image {st.session_state.current_image_index + 1}/{len(assigned_images)}")
         
-        # Simple annotation input (for demo; in real app, use a proper annotation tool)
-        class_name = st.selectbox("Class", project['product_list'])
-        x = st.slider("X center", 0.0, 1.0, 0.5)
-        y = st.slider("Y center", 0.0, 1.0, 0.5)
-        w = st.slider("Width", 0.0, 1.0, 0.1)
-        h = st.slider("Height", 0.0, 1.0, 0.1)
+        # Annotation with drawing
+        st.subheader("Draw Annotations")
+        class_name = st.selectbox("Select Class", project['product_list'])
         
-        if st.button("Add Annotation"):
-            if current_img_id not in project['annotations']:
-                project['annotations'][current_img_id] = {}
-            if st.session_state.username not in project['annotations'][current_img_id]:
-                project['annotations'][current_img_id][st.session_state.username] = []
-            project['annotations'][current_img_id][st.session_state.username].append({
-                'class': class_name,
-                'bbox': [x, y, w, h]
-            })
-            save_projects(projects)
-            st.success("Annotation added")
+        # Canvas for drawing
+        canvas_result = st_canvas(
+            fill_color="rgba(255, 165, 0, 0.3)",  # Fixed fill color with some opacity
+            stroke_width=2,
+            stroke_color="#000000",
+            background_color="#eee",
+            background_image=img,
+            update_streamlit=True,
+            height=img.height,
+            width=img.width,
+            drawing_mode="rect",
+            key=f"canvas_{current_img_id}",
+        )
+        
+        if canvas_result.json_data is not None:
+            objects = canvas_result.json_data["objects"]
+            if objects:
+                st.write("Detected rectangles:")
+                for obj in objects:
+                    if obj["type"] == "rect":
+                        left = obj["left"] / img.width
+                        top = obj["top"] / img.height
+                        width = obj["width"] / img.width
+                        height = obj["height"] / img.height
+                        x_center = left + width / 2
+                        y_center = top + height / 2
+                        st.write(f"Class: {class_name}, BBox: ({x_center:.3f}, {y_center:.3f}, {width:.3f}, {height:.3f})")
+        
+        if st.button("Save Annotations"):
+            if canvas_result.json_data is not None:
+                objects = canvas_result.json_data["objects"]
+                annotations = []
+                for obj in objects:
+                    if obj["type"] == "rect":
+                        left = obj["left"] / img.width
+                        top = obj["top"] / img.height
+                        width = obj["width"] / img.width
+                        height = obj["height"] / img.height
+                        x_center = left + width / 2
+                        y_center = top + height / 2
+                        annotations.append({
+                            'class': class_name,
+                            'bbox': [x_center, y_center, width, height]
+                        })
+                if current_img_id not in project['annotations']:
+                    project['annotations'][current_img_id] = {}
+                project['annotations'][current_img_id][st.session_state.username] = annotations
+                save_projects(projects)
+                st.success("Annotations saved")
         
         if st.button("Complete Image"):
             # Mark as completed (already handled by presence in annotations)
