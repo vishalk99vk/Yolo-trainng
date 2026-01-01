@@ -21,7 +21,6 @@ if not HAS_CANVAS_LIB:
     st.stop()
 
 # --- CONFIGURATION & ABSOLUTE PATHS ---
-# Using absolute paths prevents the "White Screen" error caused by relative path confusion
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
@@ -78,7 +77,6 @@ def login_page():
             users = load_json(USERS_FILE)
             hashed_input = hash_password(u_pass)
             
-            # Default Admin Bootstrapping
             if u_type == 'admin' and u_name == 'admin' and u_pass == 'admin':
                 st.session_state.update({"logged_in": True, "user_type": 'admin', "username": 'admin'})
                 st.rerun()
@@ -216,7 +214,7 @@ def admin_users_ui():
                 save_json(USERS_FILE, u_acc)
                 st.success(f"User '{un}' created.")
 
-# --- USER FUNCTIONS ---
+# --- USER FUNCTIONS (MODIFIED TO FIX WHITE SCREEN) ---
 def user_page():
     st.sidebar.title(f"Annotator: {st.session_state.username}")
     st.sidebar.button("Logout", on_click=logout)
@@ -233,7 +231,7 @@ def user_page():
     my_imgs = p['assignments'].get(st.session_state.username, [])
 
     if not my_imgs:
-        st.warning("No images assigned to you in this project.")
+        st.warning("No images assigned to you.")
         return
 
     if 'img_idx' not in st.session_state: st.session_state.img_idx = 0
@@ -254,38 +252,45 @@ def user_page():
     ann_path = os.path.join(ANNOTATIONS_DIR, f"{img_id}_{st.session_state.username}.json")
 
     if os.path.exists(img_path):
+        # 1. Force RGB and Load
         raw_img = Image.open(img_path).convert("RGB")
+        
+        # 2. Resizing logic
         canvas_height = 600
         aspect = raw_img.width / raw_img.height
         canvas_width = int(canvas_height * aspect)
-        resized_img = raw_img.resize((canvas_width, canvas_height))
+        # We must use LANCZOS or equivalent to ensure image data is clean
+        resized_img = raw_img.resize((canvas_width, canvas_height), Image.Resampling.LANCZOS)
 
         col_ui, col_canvas = st.columns([1, 4])
         with col_ui:
             st.subheader("Controls")
-            sel_cls = st.selectbox("Label Product As:", p['product_list'])
+            sel_cls = st.selectbox("Label Class:", p['product_list'])
             
             if st.button("💾 SAVE BOXES", use_container_width=True, type="primary"):
                 st.session_state.save_trigger = True
             
-            if st.button("⏭️ SKIP / MISSING", use_container_width=True):
+            if st.button("⏭️ SKIP", use_container_width=True):
                 save_json(ann_path, {"status": "Skipped", "annotations": []})
                 st.rerun()
             
             st.divider()
-            st.caption("Current Boxes Preview:")
-            st.image(resized_img, use_container_width=True)
+            # If the canvas is white, this preview will tell us if Streamlit can read the file at all
+            st.caption("Reference Preview:")
+            st.image(resized_img)
 
         with col_canvas:
+            # 3. Canvas with explicit key change to force re-render
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_width=2,
                 stroke_color="#ff0000",
-                background_image=resized_img,
+                background_image=resized_img, # Passing the resized PIL object
                 height=canvas_height,
                 width=canvas_width,
                 drawing_mode="rect",
-                key=f"canvas_{img_id}",
+                update_streamlit=True,
+                key=f"canvas_v2_{img_id}", # Versioning the key to break cache
             )
 
         if st.session_state.get('save_trigger', False):
@@ -303,10 +308,10 @@ def user_page():
                         yolo_anns.append({'class': sel_cls, 'bbox': [xn, yn, wn, hn]})
                 
                 save_json(ann_path, {"status": "Completed", "annotations": yolo_anns, "timestamp": str(datetime.now())})
-                st.success("Saved!")
+                st.success("Annotation Saved!")
                 st.rerun()
     else:
-        st.error("Image file missing on server.")
+        st.error("Image file not found on disk.")
 
 def download_yolo(name, p):
     buf = BytesIO()
@@ -316,7 +321,6 @@ def download_yolo(name, p):
             img_p = os.path.join(IMAGES_DIR, f"{img_id}.png")
             label_text = ""
             valid = False
-            
             for u in p['access_users']:
                 ann_p = os.path.join(ANNOTATIONS_DIR, f"{img_id}_{u}.json")
                 if os.path.exists(ann_p):
@@ -326,15 +330,13 @@ def download_yolo(name, p):
                         for a in data['annotations']:
                             idx = p['product_list'].index(a['class'])
                             label_text += f"{idx} {' '.join([f'{v:.6f}' for v in a['bbox']])}\n"
-            
             if valid:
                 z.write(img_p, f"images/{img_id}.png")
                 if label_text: z.writestr(f"labels/{img_id}.txt", label_text)
         
         yaml = f"names: {p['product_list']}\nnc: {len(p['product_list'])}\ntrain: images\nval: images"
         z.writestr("data.yaml", yaml)
-        
-    st.download_button("📩 Download Finished Dataset", buf.getvalue(), f"{name}_yolo.zip", type="primary")
+    st.download_button("📩 Download Dataset", buf.getvalue(), f"{name}_yolo.zip", type="primary")
 
 if __name__ == "__main__":
     main()
