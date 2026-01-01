@@ -68,11 +68,10 @@ def login_page():
         u_name = st.text_input("Username")
         u_pass = st.text_input("Password", type="password")
         
-        if st.button("Login", use_container_width=True):
+        if st.button("Login", use_container_width=True, type="primary"):
             users = load_json(USERS_FILE)
             hashed_input = hash_password(u_pass)
             
-            # Default Admin Check
             if u_type == 'admin' and u_name == 'admin' and u_pass == 'admin':
                 st.session_state.update({"logged_in": True, "user_type": 'admin', "username": 'admin'})
                 st.rerun()
@@ -100,14 +99,14 @@ def admin_projects_ui():
     with st.expander("➕ Create New Project"):
         p_name = st.text_input("Project Name")
         prod_file = st.file_uploader("Upload Master Product List (CSV/XLSX)", type=['xlsx', 'csv'])
-        if st.button("Create Project") and p_name and prod_file:
+        if st.button("Create Project", type="primary") and p_name and prod_file:
             df = pd.read_csv(prod_file) if prod_file.name.endswith('.csv') else pd.read_excel(prod_file)
             p_list = [str(x).strip() for x in df.iloc[:, 0].dropna().tolist()]
             proj_data = {
                 'product_list': p_list, 
                 'images': [], 
                 'access_users': [], 
-                'assignments': {} # user: [img_ids]
+                'assignments': {}
             }
             save_json(os.path.join(PROJECTS_DIR, f"{p_name}.json"), proj_data)
             st.success(f"Project '{p_name}' created.")
@@ -124,7 +123,7 @@ def admin_projects_ui():
     with col1:
         st.subheader("Add Content")
         up = st.file_uploader("Upload Images", accept_multiple_files=True)
-        if up and st.button("Upload"):
+        if up and st.button("Upload", type="primary"):
             for f in up:
                 id = str(uuid.uuid4())
                 img = Image.open(f)
@@ -153,7 +152,7 @@ def admin_projects_ui():
                 st.success(f"Assigned {len(sel_imgs)} images.")
 
     st.divider()
-    if st.button("📦 Generate & Download YOLO Dataset"):
+    if st.button("📦 Generate & Download YOLO Dataset", type="primary"):
         download_yolo(sel_p, p)
 
 def admin_review_ui():
@@ -170,8 +169,32 @@ def admin_review_ui():
         if not user_imgs:
             st.info("No images assigned to this user.")
             return
+
+        # --- SEARCH & FILTER SECTION ---
+        col_search, col_filter = st.columns(2)
+        with col_search:
+            search_query = st.text_input("🔍 Search Image ID (UUID)").strip()
+        with col_filter:
+            status_filter = st.selectbox("Filter by Status", ["All", "Completed", "Skipped", "Pending"])
+
+        # Apply filtering logic
+        filtered_imgs = user_imgs
+        if search_query:
+            filtered_imgs = [iid for iid in filtered_imgs if search_query.lower() in iid.lower()]
+        
+        # Check annotation status for filtering
+        final_list = []
+        for iid in filtered_imgs:
+            ann_p = os.path.join(ANNOTATIONS_DIR, f"{iid}_{user_to_review}.json")
+            status = load_json(ann_p, default={"status": "Pending"}).get("status")
+            if status_filter == "All" or status == status_filter:
+                final_list.append(iid)
+
+        if not final_list:
+            st.warning("No images match these search criteria.")
+            return
             
-        selected_img_id = st.selectbox("Select Image to View", user_imgs)
+        selected_img_id = st.selectbox(f"Results ({len(final_list)})", final_list)
         ann_path = os.path.join(ANNOTATIONS_DIR, f"{selected_img_id}_{user_to_review}.json")
         
         if os.path.exists(ann_path):
@@ -185,17 +208,18 @@ def admin_review_ui():
                 r = (xc + w/2) * img.width
                 b = (yc + h/2) * img.height
                 draw.rectangle([l, t, r, b], outline="red", width=5)
-                draw.text((l, t-20), a['class'], fill="red")
-            st.image(img, caption=f"Status: {data.get('status')}")
+                # Label box for clarity in review
+                draw.text((l, t-15), a['class'], fill="red")
+            st.image(img, caption=f"ID: {selected_img_id} | Status: {data.get('status')}")
         else:
-            st.warning("No annotation found for this image yet.")
+            st.warning("No annotation found for this image (Pending).")
 
 def admin_users_ui():
     st.subheader("User Management")
     u_acc = load_json(USERS_FILE)
     un = st.text_input("New Username")
     pw = st.text_input("New Password", type="password")
-    if st.button("Create User"):
+    if st.button("Create User", type="primary"):
         if un and pw:
             u_acc[un] = {'password': hash_password(pw)}
             save_json(USERS_FILE, u_acc)
@@ -225,8 +249,8 @@ def user_page():
         st.warning("No images assigned in this project.")
         return
 
-    # Navigation Logic
     if 'img_idx' not in st.session_state: st.session_state.img_idx = 0
+    if 'save_trigger' not in st.session_state: st.session_state.save_trigger = False
     
     col_nav1, col_nav2, col_nav3 = st.columns([1, 2, 1])
     with col_nav1:
@@ -242,14 +266,10 @@ def user_page():
 
     img_id = my_imgs[st.session_state.img_idx]
     img_path = os.path.join(IMAGES_DIR, f"{img_id}.png")
-    
-    # Load existing annotation if it exists
     ann_path = os.path.join(ANNOTATIONS_DIR, f"{img_id}_{st.session_state.username}.json")
-    existing_data = load_json(ann_path, default={'annotations': []})
 
     if os.path.exists(img_path):
         raw_img = Image.open(img_path).convert("RGB")
-        # Resize for Canvas
         canvas_height = 600
         aspect = raw_img.width / raw_img.height
         canvas_width = int(canvas_height * aspect)
@@ -259,9 +279,8 @@ def user_page():
         with col_ui:
             st.subheader("Tools")
             sel_cls = st.selectbox("Current Product", p['product_list'])
-            st.info("Tip: Draw boxes on the image. All boxes drawn will be saved as the selected product.")
             
-            if st.button("💾 Save Annotation", use_container_width=True, variant="primary"):
+            if st.button("💾 Save Annotation", use_container_width=True, type="primary"):
                 st.session_state.save_trigger = True
             
             if st.button("Skip Image", use_container_width=True):
@@ -280,14 +299,13 @@ def user_page():
                 key=f"canvas_{img_id}"
             )
 
-        if st.session_state.get("save_trigger"):
+        if st.session_state.save_trigger:
             st.session_state.save_trigger = False
             if canvas_result.json_data:
                 objs = canvas_result.json_data["objects"]
                 yolo_anns = []
                 for o in objs:
                     if o["type"] == "rect":
-                        # Handle negative widths/heights (drawing backwards)
                         w_abs = abs(o["width"])
                         h_abs = abs(o["height"])
                         left = o["left"] if o["width"] > 0 else o["left"] + o["width"]
@@ -309,8 +327,6 @@ def download_yolo(name, p):
         for im in p['images']:
             img_id = im['id']
             img_p = os.path.join(IMAGES_DIR, f"{img_id}.png")
-            
-            # Aggregate annotations from all users assigned to this image
             label_text = ""
             has_data = False
             
@@ -331,7 +347,7 @@ def download_yolo(name, p):
         yaml_content = f"names: {p['product_list']}\nnc: {len(p['product_list'])}\ntrain: images\nval: images"
         z.writestr("data.yaml", yaml_content)
         
-    st.download_button("Download ZIP", buf.getvalue(), f"{name}_yolo_dataset.zip")
+    st.download_button("Download ZIP", buf.getvalue(), f"{name}_yolo_dataset.zip", type="primary")
 
 if __name__ == "__main__":
     main()
