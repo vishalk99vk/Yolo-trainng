@@ -4,13 +4,12 @@ import json
 import uuid
 import zipfile
 import hashlib
-import base64
 from io import BytesIO
 import pandas as pd
-from PIL import Image, ImageDraw
+from PIL import Image
 from datetime import datetime
 
-# --- SETUP PATHS ---
+# --- SETTINGS ---
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
@@ -24,15 +23,10 @@ for d in [DATA_DIR, PROJECTS_DIR, ANNOTATIONS_DIR, IMAGES_DIR]:
 try:
     from streamlit_drawable_canvas import st_canvas
 except ImportError:
-    st.error("Run: pip install streamlit-drawable-canvas")
+    st.error("Missing dependency: `pip install streamlit-drawable-canvas`")
     st.stop()
 
 # --- HELPERS ---
-def get_image_base64(img):
-    buffered = BytesIO()
-    img.save(buffered, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode()
-
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -56,24 +50,24 @@ def main():
     if not st.session_state.logged_in:
         login_page()
     else:
-        if st.session_state.user_type == 'admin': admin_page()
-        else: user_page()
+        if st.session_state.user_type == 'admin':
+            admin_page()
+        else:
+            user_page()
 
 def login_page():
     st.header("🔑 YOLO Annotation Tool")
-    col1, _ = st.columns([1, 1])
-    with col1:
-        u_name = st.text_input("Username")
-        u_pass = st.text_input("Password", type="password")
-        if st.button("Login", use_container_width=True, type="primary"):
-            users = load_json(USERS_FILE)
-            if u_name == 'admin' and u_pass == 'admin':
-                st.session_state.update({"logged_in": True, "user_type": 'admin', "username": 'admin'})
-                st.rerun()
-            elif u_name in users and users[u_name]['password'] == hash_password(u_pass):
-                st.session_state.update({"logged_in": True, "user_type": 'user', "username": u_name})
-                st.rerun()
-            else: st.error("Invalid credentials")
+    u_name = st.text_input("Username")
+    u_pass = st.text_input("Password", type="password")
+    if st.button("Login", type="primary"):
+        users = load_json(USERS_FILE)
+        if u_name == 'admin' and u_pass == 'admin':
+            st.session_state.update({"logged_in": True, "user_type": 'admin', "username": 'admin'})
+            st.rerun()
+        elif u_name in users and users[u_name]['password'] == hash_password(u_pass):
+            st.session_state.update({"logged_in": True, "user_type": 'user', "username": u_name})
+            st.rerun()
+        else: st.error("Invalid credentials")
 
 # --- ADMIN PANEL ---
 def admin_page():
@@ -118,9 +112,6 @@ def admin_page():
                     if u_task not in p['access_users']: p['access_users'].append(u_task)
                     p['assignments'].setdefault(u_task, []).extend(sel)
                     save_json(p_path, p); st.success("Assigned!")
-            
-            if st.button("📦 Download YOLO ZIP", type="primary"):
-                download_yolo(sel_p, p)
 
     elif menu == "Users":
         st.header("User Management")
@@ -130,7 +121,7 @@ def admin_page():
         if st.button("Create User"):
             u_acc[un] = {'password': hash_password(pw)}; save_json(USERS_FILE, u_acc); st.success("Created!")
 
-# --- USER PANEL (THE ULTIMATE FIX) ---
+# --- USER PANEL (LAYERED FIX) ---
 def user_page():
     st.sidebar.title(f"Annotator: {st.session_state.username}")
     st.sidebar.button("Logout", on_click=logout)
@@ -152,7 +143,6 @@ def user_page():
 
     if 'img_idx' not in st.session_state: st.session_state.img_idx = 0
     
-    # Navigation
     c1, c2, c3 = st.columns([1, 2, 1])
     with c1: 
         if st.button("⬅️ Prev") and st.session_state.img_idx > 0:
@@ -168,46 +158,61 @@ def user_page():
     if os.path.exists(img_path):
         img = Image.open(img_path).convert("RGB")
         
-        # Determine Display Size
+        # Consistent Sizing
         canvas_width = 800
         scale = canvas_width / img.width
         canvas_height = int(img.height * scale)
-        resized = img.resize((canvas_width, canvas_height), Image.LANCZOS)
-        
-        # Convert to B64 for the Canvas
-        b64_str = get_image_base64(resized)
 
-        col_left, col_right = st.columns([1, 3])
-        with col_left:
+        col_ui, col_work = st.columns([1, 4])
+        with col_ui:
             st.subheader("Controls")
-            label = st.selectbox("Class", p['product_list'])
-            if st.button("💾 SAVE", use_container_width=True, type="primary"):
+            label = st.selectbox("Select Class", p['product_list'])
+            if st.button("💾 SAVE BOXES", use_container_width=True, type="primary"):
                 st.session_state.save_trigger = True
-            st.divider()
-            st.write("Preview:")
-            st.image(resized)
+            st.info("Draw boxes directly on the image to the right.")
 
-        with col_right:
-            # FORCE RE-RENDER CSS
+        with col_work:
+            # LAYERED CSS FIX
+            # We create a relative container, put the image at the bottom, and canvas on top
             st.markdown(f"""
                 <style>
-                iframe[title="streamlit_drawable_canvas.st_canvas"] {{
-                    background-image: url("{b64_str}") !important;
-                    background-size: cover !important;
+                .canvas-container {{
+                    position: relative;
+                    width: {canvas_width}px;
+                    height: {canvas_height}px;
+                }}
+                .background-img {{
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    width: {canvas_width}px;
+                    height: {canvas_height}px;
+                    z-index: 1;
+                }}
+                .stCanvas {{
+                    position: absolute !important;
+                    top: 0;
+                    left: 0;
+                    z-index: 2;
+                    background-color: transparent !important;
                 }}
                 </style>
                 """, unsafe_allow_html=True)
+
+            # 1. Place the visible image first
+            st.image(img, width=canvas_width)
             
+            # 2. Place the transparent canvas exactly on top
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_width=2,
                 stroke_color="#ff0000",
-                background_image=resized, # Still pass the PIL object as fallback
+                background_image=None, # Leave this empty to prevent white screen
                 update_streamlit=True,
                 height=canvas_height,
                 width=canvas_width,
                 drawing_mode="rect",
-                key=f"canvas_ultimate_{img_id}", # Unique key per image
+                key=f"layered_canvas_{img_id}",
             )
 
         if st.session_state.get('save_trigger', False):
@@ -220,7 +225,6 @@ def user_page():
                         w, h = abs(o["width"]), abs(o["height"])
                         left = o["left"] if o["width"] > 0 else o["left"] + o["width"]
                         top = o["top"] if o["height"] > 0 else o["top"] + o["height"]
-                        # Normalized YOLO coords
                         xn, yn = (left + w/2)/canvas_width, (top + h/2)/canvas_height
                         wn, hn = w/canvas_width, h/canvas_height
                         yolo_data.append({'class': label, 'bbox': [xn, yn, wn, hn]})
@@ -228,25 +232,8 @@ def user_page():
                 ann_path = os.path.join(ANNOTATIONS_DIR, f"{img_id}_{st.session_state.username}.json")
                 save_json(ann_path, {"status": "Completed", "annotations": yolo_data})
                 st.success("Saved!"); st.rerun()
-
-def download_yolo(name, p):
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, 'w') as z:
-        for im in p['images']:
-            img_id = im['id']
-            for u in p['access_users']:
-                ap = os.path.join(ANNOTATIONS_DIR, f"{img_id}_{u}.json")
-                if os.path.exists(ap):
-                    data = load_json(ap)
-                    if data.get('status') == "Completed":
-                        z.write(os.path.join(IMAGES_DIR, f"{img_id}.png"), f"images/{img_id}.png")
-                        txt = ""
-                        for a in data['annotations']:
-                            idx = p['product_list'].index(a['class'])
-                            txt += f"{idx} {' '.join([f'{v:.6f}' for v in a['bbox']])}\n"
-                        z.writestr(f"labels/{img_id}.txt", txt)
-        z.writestr("data.yaml", f"names: {p['product_list']}\nnc: {len(p['product_list'])}\ntrain: images\nval: images")
-    st.download_button("Download", buf.getvalue(), f"{name}.zip")
+    else:
+        st.error("Image file not found.")
 
 if __name__ == "__main__":
     main()
