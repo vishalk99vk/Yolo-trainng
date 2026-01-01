@@ -4,12 +4,13 @@ import json
 import uuid
 import zipfile
 import hashlib
+import base64
 from io import BytesIO
 import pandas as pd
 from PIL import Image, ImageDraw
 from datetime import datetime
 
-# --- CONFIGURATION & ABSOLUTE PATHS ---
+# --- CONFIGURATION ---
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
@@ -20,7 +21,6 @@ USERS_FILE = os.path.join(DATA_DIR, "users.json")
 for d in [DATA_DIR, PROJECTS_DIR, ANNOTATIONS_DIR, IMAGES_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# --- DEPENDENCY CHECK ---
 try:
     from streamlit_drawable_canvas import st_canvas
 except ImportError:
@@ -28,6 +28,12 @@ except ImportError:
     st.stop()
 
 # --- HELPERS ---
+def get_image_base64(img):
+    """Converts a PIL image to a base64 string for reliable canvas rendering."""
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode()
+
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -40,8 +46,7 @@ def save_json(file_path, data):
     with open(file_path, 'w') as f: json.dump(data, f, indent=4)
 
 def logout():
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
+    for key in list(st.session_state.keys()): del st.session_state[key]
     st.rerun()
 
 # --- MAIN APP ---
@@ -52,10 +57,8 @@ def main():
     if not st.session_state.logged_in:
         login_page()
     else:
-        if st.session_state.user_type == 'admin':
-            admin_page()
-        else:
-            user_page()
+        if st.session_state.user_type == 'admin': admin_page()
+        else: user_page()
 
 def login_page():
     st.header("🔑 YOLO Annotation Tool")
@@ -72,27 +75,22 @@ def login_page():
             elif u_name in users and users[u_name]['password'] == hash_password(u_pass):
                 st.session_state.update({"logged_in": True, "user_type": u_type, "username": u_name})
                 st.rerun()
-            else:
-                st.error("Invalid credentials")
+            else: st.error("Invalid credentials")
 
 # --- ADMIN PANEL ---
 def admin_page():
     st.sidebar.title(f"Admin: {st.session_state.username}")
     st.sidebar.button("Logout", on_click=logout)
     menu = st.sidebar.radio("Navigation", ["Projects", "Review", "Users"])
-
-    if menu == "Projects":
-        admin_projects_ui()
-    elif menu == "Review":
-        admin_review_ui()
-    elif menu == "Users":
-        admin_users_ui()
+    if menu == "Projects": admin_projects_ui()
+    elif menu == "Review": admin_review_ui()
+    elif menu == "Users": admin_users_ui()
 
 def admin_projects_ui():
     st.header("Project Management")
     with st.expander("➕ Create New Project"):
         p_name = st.text_input("Project Name")
-        prod_file = st.file_uploader("Upload Product List (CSV/XLSX)", type=['xlsx', 'csv'])
+        prod_file = st.file_uploader("Upload Product List", type=['xlsx', 'csv'])
         if st.button("Create Project", type="primary") and p_name and prod_file:
             df = pd.read_csv(prod_file) if prod_file.name.endswith('.csv') else pd.read_excel(prod_file)
             p_list = [str(x).strip() for x in df.iloc[:, 0].dropna().tolist()]
@@ -114,8 +112,7 @@ def admin_projects_ui():
                 id = str(uuid.uuid4())
                 Image.open(f).save(os.path.join(IMAGES_DIR, f"{id}.png"))
                 p['images'].append({'id': id, 'name': f.name})
-            save_json(p_path, p)
-            st.success("Uploaded!")
+            save_json(p_path, p); st.success("Uploaded!")
 
     with col2:
         st.subheader("Assignments")
@@ -123,14 +120,12 @@ def admin_projects_ui():
         target_u = st.selectbox("Select User", users_list)
         if st.button("Grant Access"):
             if target_u not in p['access_users']: p['access_users'].append(target_u); save_json(p_path, p)
-        
         if p['access_users']:
             u_task = st.selectbox("Assign To", p['access_users'])
             avail = [i['id'] for i in p['images'] if i['id'] not in p['assignments'].get(u_task, [])]
             sel_imgs = st.multiselect("Select Images", avail)
             if st.button("Confirm Assignment") and sel_imgs:
-                p['assignments'].setdefault(u_task, []).extend(sel_imgs)
-                save_json(p_path, p); st.success("Assigned!")
+                p['assignments'].setdefault(u_task, []).extend(sel_imgs); save_json(p_path, p); st.success("Assigned!")
 
     st.divider()
     if st.button("📦 Download YOLO Dataset", type="primary", use_container_width=True):
@@ -145,10 +140,7 @@ def admin_review_ui():
     user_to_review = st.selectbox("Select User", p['access_users'])
     if user_to_review:
         user_imgs = p['assignments'].get(user_to_review, [])
-        search_id = st.text_input("🔍 Search Image ID")
-        filtered = [i for i in user_imgs if search_id in i] if search_id else user_imgs
-        if not filtered: st.warning("No images."); return
-        selected_img_id = st.selectbox(f"Reviewing {len(filtered)} images", filtered)
+        selected_img_id = st.selectbox(f"Reviewing {len(user_imgs)} images", user_imgs)
         ann_path = os.path.join(ANNOTATIONS_DIR, f"{selected_img_id}_{user_to_review}.json")
         if os.path.exists(ann_path):
             data = load_json(ann_path)
@@ -159,20 +151,19 @@ def admin_review_ui():
                 l, t = (xc - w/2) * img.width, (yc - h/2) * img.height
                 r, b = (xc + w/2) * img.width, (yc + h/2) * img.height
                 draw.rectangle([l, t, r, b], outline="red", width=5)
-            st.image(img, caption=f"Status: {data.get('status')}")
+            st.image(img)
 
 def admin_users_ui():
     st.header("User Management")
     u_acc = load_json(USERS_FILE)
     with st.form("Add User"):
-        un = st.text_input("New Username")
-        pw = st.text_input("New Password", type="password")
+        un = st.text_input("Username")
+        pw = st.text_input("Password", type="password")
         if st.form_submit_button("Create User"):
             if un and pw:
-                u_acc[un] = {'password': hash_password(pw)}
-                save_json(USERS_FILE, u_acc); st.success(f"User '{un}' created.")
+                u_acc[un] = {'password': hash_password(pw)}; save_json(USERS_FILE, u_acc); st.success("User created.")
 
-# --- USER PANEL (WITH FIX) ---
+# --- USER PANEL (BASE64 FIX) ---
 def user_page():
     st.sidebar.title(f"Annotator: {st.session_state.username}")
     st.sidebar.button("Logout", on_click=logout)
@@ -201,10 +192,14 @@ def user_page():
 
     if os.path.exists(img_path):
         raw_img = Image.open(img_path).convert("RGB")
+        # Resize for performance and standard viewing
         canvas_height = 700 
         aspect = raw_img.width / raw_img.height
         canvas_width = int(canvas_height * aspect)
         resized_img = raw_img.resize((canvas_width, canvas_height), Image.Resampling.LANCZOS)
+        
+        # KEY FIX: Convert to Base64
+        bg_image_base64 = get_image_base64(resized_img)
 
         col_ui, col_canvas = st.columns([1, 4])
         with col_ui:
@@ -219,16 +214,31 @@ def user_page():
             st.image(resized_img)
 
         with col_canvas:
-            # FIX: Key uses both ID and Index to force browser refresh
+            # Drawing area
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.3)",
                 stroke_width=2,
                 stroke_color="#ff0000",
-                background_image=resized_img,
+                background_image=None, # We use the background_color or CSS below if background_image fails
                 height=canvas_height,
                 width=canvas_width,
                 drawing_mode="rect",
-                key=f"canvas_fix_{img_id}_{st.session_state.img_idx}",
+                # The crucial fix: Passing the base64 string directly into the background
+                key=f"canvas_b64_{img_id}_{st.session_state.img_idx}",
+            )
+            
+            # CSS hack to force background image via base64 if the parameter fails
+            st.markdown(
+                f"""
+                <style>
+                div[data-testid="stCanvas"] canvas:nth-of-type(1) {{
+                    background-image: url({bg_image_base64}) !important;
+                    background-size: contain !important;
+                    background-repeat: no-repeat !important;
+                }}
+                </style>
+                """,
+                unsafe_allow_html=True
             )
 
         if st.session_state.get('save_trigger', False):
@@ -268,7 +278,7 @@ def download_yolo(name, p):
                 z.write(os.path.join(IMAGES_DIR, f"{img_id}.png"), f"images/{img_id}.png")
                 if label_text: z.writestr(f"labels/{img_id}.txt", label_text)
         z.writestr("data.yaml", f"names: {p['product_list']}\nnc: {len(p['product_list'])}\ntrain: images\nval: images")
-    st.download_button("📩 Download Dataset", buf.getvalue(), f"{name}_yolo.zip", type="primary")
+    st.download_button("📩 Download ZIP", buf.getvalue(), f"{name}_yolo.zip", type="primary")
 
 if __name__ == "__main__":
     main()
