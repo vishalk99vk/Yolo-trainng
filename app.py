@@ -1,26 +1,38 @@
 import streamlit as st
 import os
-import cv2
-import numpy as np
 import json
 import uuid
 import zipfile
 import hashlib
-from PIL import Image
-from streamlit_image_annotation import detection
+import base64
+from io import BytesIO
+import pandas as pd
+from PIL import Image, ImageDraw
 from datetime import datetime
 
-# --- 1. DIRECTORY & CONFIG SETUP ---
-BASE_DIR = os.path.abspath("retail_data")
-PROJECTS_DIR = os.path.join(BASE_DIR, "projects")
-ANNOTATIONS_DIR = os.path.join(BASE_DIR, "annotations")
-IMAGES_DIR = os.path.join(BASE_DIR, "images")
-USERS_FILE = os.path.join(BASE_DIR, "users.json")
+# --- SETUP PATHS ---
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
+ANNOTATIONS_DIR = os.path.join(DATA_DIR, "annotations")
+IMAGES_DIR = os.path.join(DATA_DIR, "images")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
-for d in [BASE_DIR, PROJECTS_DIR, ANNOTATIONS_DIR, IMAGES_DIR]:
+for d in [DATA_DIR, PROJECTS_DIR, ANNOTATIONS_DIR, IMAGES_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# --- 2. HELPERS ---
+try:
+    from streamlit_drawable_canvas import st_canvas
+except ImportError:
+    st.error("Run: pip install streamlit-drawable-canvas")
+    st.stop()
+
+# --- HELPERS ---
+def get_image_base64(img):
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode()
+
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -36,28 +48,24 @@ def logout():
     for key in list(st.session_state.keys()): del st.session_state[key]
     st.rerun()
 
-# --- 3. MAIN APP ---
+# --- MAIN NAVIGATION ---
 def main():
-    st.set_page_config(page_title="SKU Annotator Pro", layout="wide")
+    st.set_page_config(page_title="YOLO Annotator Pro", layout="wide")
+    if 'logged_in' not in st.session_state: st.session_state.logged_in = False
     
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-
     if not st.session_state.logged_in:
         login_page()
     else:
-        if st.session_state.user_type == 'admin':
-            admin_page()
-        else:
-            user_panel()
+        if st.session_state.user_type == 'admin': admin_page()
+        else: user_page()
 
 def login_page():
-    st.title("🔑 Retail SKU Annotator")
+    st.header("🔑 YOLO Annotation Tool")
     col1, _ = st.columns([1, 1])
     with col1:
         u_name = st.text_input("Username")
         u_pass = st.text_input("Password", type="password")
-        if st.button("Login", type="primary", use_container_width=True):
+        if st.button("Login", use_container_width=True, type="primary"):
             users = load_json(USERS_FILE)
             if u_name == 'admin' and u_pass == 'admin':
                 st.session_state.update({"logged_in": True, "user_type": 'admin', "username": 'admin'})
@@ -65,165 +73,180 @@ def login_page():
             elif u_name in users and users[u_name]['password'] == hash_password(u_pass):
                 st.session_state.update({"logged_in": True, "user_type": 'user', "username": u_name})
                 st.rerun()
-            else:
-                st.error("Invalid credentials")
+            else: st.error("Invalid credentials")
 
-# --- 4. ADMIN PANEL ---
+# --- ADMIN PANEL ---
 def admin_page():
     st.sidebar.title(f"Admin: {st.session_state.username}")
     st.sidebar.button("Logout", on_click=logout)
-    menu = st.sidebar.radio("Navigation", ["Manage Projects", "User Management"])
+    menu = st.sidebar.radio("Navigation", ["Projects", "Users"])
 
-    if menu == "Manage Projects":
+    if menu == "Projects":
         st.header("Project Management")
-        
-        # Create Project
-        with st.expander("🏗️ Create New Project"):
+        with st.expander("➕ New Project"):
             p_name = st.text_input("Project Name")
-            p_list_input = st.text_area("Product List (comma separated)", "product, SKU_A, SKU_B")
-            if st.button("Create Project"):
-                labels = [x.strip() for x in p_list_input.split(",")]
-                save_json(os.path.join(PROJECTS_DIR, f"{p_name}.json"), {
-                    'labels': labels, 'images': [], 'assignments': {}
-                })
-                st.success("Project Created!")
+            p_file = st.file_uploader("Upload Product List (CSV)", type=['csv'])
+            if st.button("Create") and p_name and p_file:
+                df = pd.read_csv(p_file)
+                p_list = [str(x).strip() for x in df.iloc[:, 0].dropna().tolist()]
+                save_json(os.path.join(PROJECTS_DIR, f"{p_name}.json"), {'product_list': p_list, 'images': [], 'access_users': [], 'assignments': {}})
+                st.rerun()
 
-        # Project Operations
         available = [f.replace(".json", "") for f in os.listdir(PROJECTS_DIR)]
         if available:
             sel_p = st.selectbox("Select Project", available)
             p_path = os.path.join(PROJECTS_DIR, f"{sel_p}.json")
-            proj = load_json(p_path)
+            p = load_json(p_path)
 
             col1, col2 = st.columns(2)
             with col1:
-                st.subheader("Upload Images")
-                up = st.file_uploader("Select SKU Photos", accept_multiple_files=True)
-                if up and st.button("Store Images"):
+                st.subheader("Add Content")
+                up = st.file_uploader("Upload Images", accept_multiple_files=True)
+                if up and st.button("Upload"):
                     for f in up:
-                        img_id = str(uuid.uuid4())[:8] + "_" + f.name
-                        with open(os.path.join(IMAGES_DIR, img_id), "wb") as file:
-                            file.write(f.getbuffer())
-                        proj['images'].append(img_id)
-                    save_json(p_path, proj)
-                    st.rerun()
-
+                        id = str(uuid.uuid4())
+                        Image.open(f).save(os.path.join(IMAGES_DIR, f"{id}.png"))
+                        p['images'].append({'id': id, 'name': f.name})
+                    save_json(p_path, p); st.rerun()
             with col2:
-                st.subheader("Assign Tasks")
+                st.subheader("Assignments")
                 users = list(load_json(USERS_FILE).keys())
-                target_u = st.selectbox("Target User", users)
-                if st.button("Assign All Images"):
-                    proj['assignments'][target_u] = proj['images']
-                    save_json(p_path, proj)
-                    st.success(f"Assigned to {target_u}")
+                u_task = st.selectbox("Assign To", users)
+                avail = [i['id'] for i in p['images']]
+                sel = st.multiselect("Select Images", avail)
+                if st.button("Assign"):
+                    if u_task not in p['access_users']: p['access_users'].append(u_task)
+                    p['assignments'].setdefault(u_task, []).extend(sel)
+                    save_json(p_path, p); st.success("Assigned!")
+            
+            if st.button("📦 Download YOLO ZIP", type="primary"):
+                download_yolo(sel_p, p)
 
-            st.divider()
-            if st.button("📦 Generate & Download YOLO Dataset", type="primary"):
-                download_yolo(sel_p, proj)
-
-    elif menu == "User Management":
+    elif menu == "Users":
         st.header("User Management")
         u_acc = load_json(USERS_FILE)
-        un = st.text_input("New Username")
-        pw = st.text_input("New Password")
-        if st.button("Create Account"):
-            u_acc[un] = {'password': hash_password(pw)}
-            save_json(USERS_FILE, u_acc)
-            st.success("User added!")
+        un = st.text_input("Username")
+        pw = st.text_input("Password")
+        if st.button("Create User"):
+            u_acc[un] = {'password': hash_password(pw)}; save_json(USERS_FILE, u_acc); st.success("Created!")
 
-# --- 5. USER PANEL (USING YOUR WORKING LOGIC) ---
-def user_panel():
-    st.sidebar.title(f"👤 {st.session_state.username}")
+# --- USER PANEL (THE ULTIMATE FIX) ---
+def user_page():
+    st.sidebar.title(f"Annotator: {st.session_state.username}")
     st.sidebar.button("Logout", on_click=logout)
     
-    projects = [f.replace(".json", "") for f in os.listdir(PROJECTS_DIR)]
-    my_projs = [p for p in projects if st.session_state.username in load_json(os.path.join(PROJECTS_DIR, f"{p}.json")).get('assignments', {})]
+    available = [f.replace(".json", "") for f in os.listdir(PROJECTS_DIR)]
+    my_projs = [pn for pn in available if st.session_state.username in load_json(os.path.join(PROJECTS_DIR, f"{pn}.json")).get('access_users', [])]
     
     if not my_projs:
-        st.info("No projects assigned to you yet.")
+        st.info("No projects assigned.")
         return
 
-    sel_p = st.selectbox("Current Project", my_projs)
-    proj = load_json(os.path.join(PROJECTS_DIR, f"{sel_p}.json"))
-    my_imgs = proj['assignments'].get(st.session_state.username, [])
+    sel_p = st.selectbox("Project", my_projs)
+    p = load_json(os.path.join(PROJECTS_DIR, f"{sel_p}.json"))
+    my_imgs = p['assignments'].get(st.session_state.username, [])
 
-    if 'idx' not in st.session_state: st.session_state.idx = 0
+    if not my_imgs:
+        st.warning("No images assigned.")
+        return
+
+    if 'img_idx' not in st.session_state: st.session_state.img_idx = 0
     
-    # Nav controls
+    # Navigation
     c1, c2, c3 = st.columns([1, 2, 1])
     with c1: 
-        if st.button("⬅️ Prev") and st.session_state.idx > 0: st.session_state.idx -= 1; st.rerun()
-    with c2: st.write(f"Image {st.session_state.idx + 1} / {len(my_imgs)}")
+        if st.button("⬅️ Prev") and st.session_state.img_idx > 0:
+            st.session_state.img_idx -= 1; st.rerun()
+    with c2: st.write(f"**Image {st.session_state.img_idx + 1} / {len(my_imgs)}**")
     with c3:
-        if st.button("Next ➡️") and st.session_state.idx < len(my_imgs)-1: st.session_state.idx += 1; st.rerun()
+        if st.button("Next ➡️") and st.session_state.img_idx < len(my_imgs) - 1:
+            st.session_state.img_idx += 1; st.rerun()
 
-    img_name = my_imgs[st.session_state.idx]
-    img_path = os.path.join(IMAGES_DIR, img_name)
+    img_id = my_imgs[st.session_state.img_idx]
+    img_path = os.path.join(IMAGES_DIR, f"{img_id}.png")
     
-    # LOAD IMAGE FOR METADATA
-    img_cv = cv2.imread(img_path)
-    h, w, _ = img_cv.shape
+    if os.path.exists(img_path):
+        img = Image.open(img_path).convert("RGB")
+        
+        # Determine Display Size
+        canvas_width = 800
+        scale = canvas_width / img.width
+        canvas_height = int(img.height * scale)
+        resized = img.resize((canvas_width, canvas_height), Image.LANCZOS)
+        
+        # Convert to B64 for the Canvas
+        b64_str = get_image_base64(resized)
 
-    # ANNOTATION TOOL (Your working logic)
-    # Note: We use the filename as the key to ensure state refresh
-    new_annotations = detection(
-        image_path=img_path,
-        label_list=proj['labels'],
-        bboxes=[], labels=[],
-        key=f"ann_{img_name}"
-    )
+        col_left, col_right = st.columns([1, 3])
+        with col_left:
+            st.subheader("Controls")
+            label = st.selectbox("Class", p['product_list'])
+            if st.button("💾 SAVE", use_container_width=True, type="primary"):
+                st.session_state.save_trigger = True
+            st.divider()
+            st.write("Preview:")
+            st.image(resized)
 
-    if st.button("Submit Annotations", type="primary"):
-        if new_annotations:
-            # Save in JSON format for the tool
-            ann_file = os.path.join(ANNOTATIONS_DIR, f"{img_name}_{st.session_state.username}.json")
-            save_json(ann_file, new_annotations)
+        with col_right:
+            # FORCE RE-RENDER CSS
+            st.markdown(f"""
+                <style>
+                iframe[title="streamlit_drawable_canvas.st_canvas"] {{
+                    background-image: url("{b64_str}") !important;
+                    background-size: cover !important;
+                }}
+                </style>
+                """, unsafe_allow_html=True)
             
-            # Also save in YOLO TXT format for your RF-DETR
-            txt_name = os.path.splitext(img_name)[0] + ".txt"
-            with open(os.path.join(BASE_DIR, "labels", txt_name), "w") as f:
-                for ann in new_annotations:
-                    bx = ann['bbox'] # [x, y, width, height]
-                    label_idx = proj['labels'].index(ann['label'])
-                    xc, yc = (bx[0] + bx[2]/2) / w, (bx[1] + bx[3]/2) / h
-                    nw, nh = bx[2] / w, bx[3] / h
-                    f.write(f"{label_idx} {xc} {yc} {nw} {nh}\n")
-            
-            st.success(f"Saved {len(new_annotations)} products!")
+            canvas_result = st_canvas(
+                fill_color="rgba(255, 165, 0, 0.3)",
+                stroke_width=2,
+                stroke_color="#ff0000",
+                background_image=resized, # Still pass the PIL object as fallback
+                update_streamlit=True,
+                height=canvas_height,
+                width=canvas_width,
+                drawing_mode="rect",
+                key=f"canvas_ultimate_{img_id}", # Unique key per image
+            )
 
-# --- 6. DATASET EXPORT ---
-def download_yolo(name, proj):
+        if st.session_state.get('save_trigger', False):
+            st.session_state.save_trigger = False
+            if canvas_result.json_data:
+                objs = canvas_result.json_data["objects"]
+                yolo_data = []
+                for o in objs:
+                    if o["type"] == "rect":
+                        w, h = abs(o["width"]), abs(o["height"])
+                        left = o["left"] if o["width"] > 0 else o["left"] + o["width"]
+                        top = o["top"] if o["height"] > 0 else o["top"] + o["height"]
+                        # Normalized YOLO coords
+                        xn, yn = (left + w/2)/canvas_width, (top + h/2)/canvas_height
+                        wn, hn = w/canvas_width, h/canvas_height
+                        yolo_data.append({'class': label, 'bbox': [xn, yn, wn, hn]})
+                
+                ann_path = os.path.join(ANNOTATIONS_DIR, f"{img_id}_{st.session_state.username}.json")
+                save_json(ann_path, {"status": "Completed", "annotations": yolo_data})
+                st.success("Saved!"); st.rerun()
+
+def download_yolo(name, p):
     buf = BytesIO()
     with zipfile.ZipFile(buf, 'w') as z:
-        for img_name in proj['images']:
-            # Find any completed annotations for this image
-            # In this simple version, we look for the first one found
-            found = False
-            for f in os.listdir(ANNOTATIONS_DIR):
-                if f.startswith(img_name):
-                    data = load_json(os.path.join(ANNOTATIONS_DIR, f))
-                    img_path = os.path.join(IMAGES_DIR, img_name)
-                    img_cv = cv2.imread(img_path)
-                    h, w, _ = img_cv.shape
-                    
-                    z.write(img_path, f"images/{img_name}")
-                    txt_content = ""
-                    for ann in data:
-                        bx = ann['bbox']
-                        l_idx = proj['labels'].index(ann['label'])
-                        xc, yc = (bx[0] + bx[2]/2) / w, (bx[1] + bx[3]/2) / h
-                        nw, nh = bx[2] / w, bx[3] / h
-                        txt_content += f"{l_idx} {xc} {yc} {nw} {nh}\n"
-                    
-                    z.writestr(f"labels/{os.path.splitext(img_name)[0]}.txt", txt_content)
-                    found = True
-                    break
-        
-        yaml = f"names: {proj['labels']}\nnc: {len(proj['labels'])}\ntrain: images\nval: images"
-        z.writestr("data.yaml", yaml)
-        
-    st.download_button("📩 Download Dataset", buf.getvalue(), f"{name}_dataset.zip")
+        for im in p['images']:
+            img_id = im['id']
+            for u in p['access_users']:
+                ap = os.path.join(ANNOTATIONS_DIR, f"{img_id}_{u}.json")
+                if os.path.exists(ap):
+                    data = load_json(ap)
+                    if data.get('status') == "Completed":
+                        z.write(os.path.join(IMAGES_DIR, f"{img_id}.png"), f"images/{img_id}.png")
+                        txt = ""
+                        for a in data['annotations']:
+                            idx = p['product_list'].index(a['class'])
+                            txt += f"{idx} {' '.join([f'{v:.6f}' for v in a['bbox']])}\n"
+                        z.writestr(f"labels/{img_id}.txt", txt)
+        z.writestr("data.yaml", f"names: {p['product_list']}\nnc: {len(p['product_list'])}\ntrain: images\nval: images")
+    st.download_button("Download", buf.getvalue(), f"{name}.zip")
 
-from io import BytesIO
 if __name__ == "__main__":
     main()
